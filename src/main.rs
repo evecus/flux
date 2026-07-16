@@ -29,17 +29,17 @@ async fn main() -> Result<()> {
     if args.get(1).map(|s| s.as_str()) == Some("generate") {
         match args.get(2).map(|s| s.as_str()) {
             Some("wireguard-keypair") => return generate::wireguard_keypair(),
-            Some("reality-keypair")   => return generate::reality_keypair(),
-            Some("uuid")              => return generate::uuid(),
+            Some("reality-keypair") => return generate::reality_keypair(),
+            Some("uuid") => return generate::uuid(),
             Some("password") => {
-                let length: usize = args.get(3)
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(16);
+                let length: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(16);
                 return generate::password(length);
             }
             _ => {
                 eprintln!("用法:");
-                eprintln!("  flux generate wireguard-keypair        生成 WireGuard 服务端+客户端密钥对");
+                eprintln!(
+                    "  flux generate wireguard-keypair        生成 WireGuard 服务端+客户端密钥对"
+                );
                 eprintln!("  flux generate reality-keypair          生成 Reality x25519 密钥对");
                 eprintln!("  flux generate uuid                     生成随机 UUID v4");
                 eprintln!("  flux generate password [位数]          生成随机密码（默认16位）");
@@ -80,7 +80,6 @@ async fn main() -> Result<()> {
     for node in cfg.node {
         let tag = node.tag.clone();
         match node.inner {
-
             // ── Hysteria2 ─────────────────────────────────────────────────────
             config::NodeInner::Hysteria2(c) => {
                 let c = Arc::new(c);
@@ -114,7 +113,10 @@ async fn main() -> Result<()> {
             // ── VMess ─────────────────────────────────────────────────────────
             config::NodeInner::Vmess(c) => {
                 let c = Arc::new(c);
-                info!("[{tag}] vmess, listen: {}, transport={}", c.listen, c.transport.r#type);
+                info!(
+                    "[{tag}] vmess, listen: {}, transport={}",
+                    c.listen, c.transport.r#type
+                );
                 handles.push(tokio::spawn(async move {
                     if let Err(e) = vmess::run(c).await {
                         tracing::error!("[{tag}] server exited: {e:#}");
@@ -125,7 +127,10 @@ async fn main() -> Result<()> {
             // ── Trojan ────────────────────────────────────────────────────────
             config::NodeInner::Trojan(c) => {
                 let c = Arc::new(c);
-                info!("[{tag}] trojan, listen: {}, transport={}", c.listen, c.transport.r#type);
+                info!(
+                    "[{tag}] trojan, listen: {}, transport={}",
+                    c.listen, c.transport.r#type
+                );
                 handles.push(tokio::spawn(async move {
                     if let Err(e) = trojan::run(c).await {
                         tracing::error!("[{tag}] server exited: {e:#}");
@@ -150,7 +155,11 @@ async fn main() -> Result<()> {
             // ── TUIC ──────────────────────────────────────────────────────────
             config::NodeInner::Tuic(c) => {
                 let c = Arc::new(c);
-                info!("[{tag}] tuic, listen: {}, users: {}", c.listen, c.users.len());
+                info!(
+                    "[{tag}] tuic, listen: {}, users: {}",
+                    c.listen,
+                    c.users.len()
+                );
                 handles.push(tokio::spawn(async move {
                     if let Err(e) = tuic::run(c).await {
                         tracing::error!("[{tag}] server exited: {e:#}");
@@ -161,7 +170,11 @@ async fn main() -> Result<()> {
             // ── WireGuard ─────────────────────────────────────────────────────
             config::NodeInner::Wireguard(c) => {
                 let c = Arc::new(c);
-                info!("[{tag}] wireguard, listen: {}, peers: {}", c.listen, c.peers.len());
+                info!(
+                    "[{tag}] wireguard, listen: {}, peers: {}",
+                    c.listen,
+                    c.peers.len()
+                );
                 handles.push(tokio::spawn(async move {
                     if let Err(e) = wireguard::server::run(c).await {
                         tracing::error!("[{tag}] server exited: {e:#}");
@@ -182,7 +195,11 @@ async fn main() -> Result<()> {
 
             // ── SOCKS5 ────────────────────────────────────────────────────────
             config::NodeInner::Socks(c) => {
-                let auth_label = if c.users.is_empty() { "no-auth" } else { "password" };
+                let auth_label = if c.users.is_empty() {
+                    "no-auth"
+                } else {
+                    "password"
+                };
                 let c = Arc::new(c);
                 info!("[{tag}] socks5, listen: {}, auth={auth_label}", c.listen);
                 handles.push(tokio::spawn(async move {
@@ -194,10 +211,17 @@ async fn main() -> Result<()> {
 
             // ── HTTP CONNECT ──────────────────────────────────────────────────
             config::NodeInner::Http(c) => {
-                let auth_label = if c.users.is_empty() { "no-auth" } else { "password" };
+                let auth_label = if c.users.is_empty() {
+                    "no-auth"
+                } else {
+                    "password"
+                };
                 let tls_label = if c.tls.is_some() { "tls" } else { "plain" };
                 let c = Arc::new(c);
-                info!("[{tag}] http, listen: {}, auth={auth_label}, tls={tls_label}", c.listen);
+                info!(
+                    "[{tag}] http, listen: {}, auth={auth_label}, tls={tls_label}",
+                    c.listen
+                );
                 handles.push(tokio::spawn(async move {
                     if let Err(e) = http::run(c).await {
                         tracing::error!("[{tag}] server exited: {e:#}");
@@ -210,7 +234,9 @@ async fn main() -> Result<()> {
                 let c = Arc::new(c);
                 info!(
                     "[{tag}] naiveproxy, listen: {}, users: {}, padding={}",
-                    c.listen, c.users.len(), c.padding,
+                    c.listen,
+                    c.users.len(),
+                    c.padding,
                 );
                 handles.push(tokio::spawn(async move {
                     if let Err(e) = naiveproxy::run(c).await {
@@ -225,7 +251,9 @@ async fn main() -> Result<()> {
         .await
         .context("failed to listen for ctrl-c")?;
     info!("Shutting down...");
-    for h in handles { h.abort(); }
+    for h in handles {
+        h.abort();
+    }
 
     Ok(())
 }

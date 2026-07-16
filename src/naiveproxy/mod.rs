@@ -119,7 +119,10 @@ async fn handle_request(
     let target = match request.uri().authority() {
         Some(a) => a.to_string(),
         None => {
-            let resp = Response::builder().status(StatusCode::BAD_REQUEST).body(()).unwrap();
+            let resp = Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(())
+                .unwrap();
             let _ = respond.send_response(resp, true);
             bail!("CONNECT request without :authority from {peer}");
         }
@@ -131,7 +134,10 @@ async fn handle_request(
     let outbound = match shared_net::dial_tcp(&target, bind_ip).await {
         Ok(s) => s,
         Err(e) => {
-            let resp = Response::builder().status(StatusCode::BAD_GATEWAY).body(()).unwrap();
+            let resp = Response::builder()
+                .status(StatusCode::BAD_GATEWAY)
+                .body(())
+                .unwrap();
             let _ = respond.send_response(resp, true);
             bail!("CONNECT {target} failed: {e}");
         }
@@ -205,7 +211,10 @@ async fn relay_plain(
 
 /// 带流控背压地把一段数据写进 h2 SendStream：先 reserve_capacity，
 /// 再等 poll_capacity 分配到窗口后才 send_data，避免无限制在内存里堆积。
-pub(crate) async fn send_backpressured(send: &mut SendStream<Bytes>, mut data: Bytes) -> Result<(), h2::Error> {
+pub(crate) async fn send_backpressured(
+    send: &mut SendStream<Bytes>,
+    mut data: Bytes,
+) -> Result<(), h2::Error> {
     while !data.is_empty() {
         send.reserve_capacity(data.len());
         let cap = match poll_fn(|cx| send.poll_capacity(cx)).await {
@@ -226,14 +235,24 @@ fn check_basic_auth(header: Option<&http::HeaderValue>, cfg: &NaiveproxyConfig) 
     if cfg.users.is_empty() {
         return false; // naiveproxy 必须配置至少一个用户，没配就一律视为未认证（全部走 masquerade）
     }
-    let Some(header) = header.and_then(|v| v.to_str().ok()) else { return false };
-    let Some(b64) = header.strip_prefix("Basic ") else { return false };
+    let Some(header) = header.and_then(|v| v.to_str().ok()) else {
+        return false;
+    };
+    let Some(b64) = header.strip_prefix("Basic ") else {
+        return false;
+    };
     let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(b64.trim()) else {
         return false;
     };
-    let Ok(decoded) = String::from_utf8(decoded) else { return false };
-    let Some((user, pass)) = decoded.split_once(':') else { return false };
-    cfg.users.iter().any(|u| u.username == user && u.password == pass)
+    let Ok(decoded) = String::from_utf8(decoded) else {
+        return false;
+    };
+    let Some((user, pass)) = decoded.split_once(':') else {
+        return false;
+    };
+    cfg.users
+        .iter()
+        .any(|u| u.username == user && u.password == pass)
 }
 
 // ── Masquerade（h2 版本）────────────────────────────────────────────────────
@@ -297,14 +316,22 @@ fn masquerade_502() -> MasqResponse {
     MasqResponse { parts, body }
 }
 
-async fn masquerade_proxy(req: &Request<RecvStream>, target_base: &str, rewrite_host: bool) -> MasqResponse {
+async fn masquerade_proxy(
+    req: &Request<RecvStream>,
+    target_base: &str,
+    rewrite_host: bool,
+) -> MasqResponse {
     use http_body_util::{BodyExt, Empty};
     use hyper::body::Bytes as HBytes;
     use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE, HOST, LOCATION, TRANSFER_ENCODING};
     use hyper_util::client::legacy::Client;
     use hyper_util::rt::TokioExecutor;
 
-    let path_and_query = req.uri().path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    let path_and_query = req
+        .uri()
+        .path_and_query()
+        .map(|p| p.as_str())
+        .unwrap_or("/");
     let target_url = format!("{}{}", target_base.trim_end_matches('/'), path_and_query);
 
     let target_uri: hyper::Uri = match target_url.parse() {
@@ -312,7 +339,9 @@ async fn masquerade_proxy(req: &Request<RecvStream>, target_base: &str, rewrite_
         Err(_) => return masquerade_404(),
     };
 
-    let mut builder = hyper::Request::builder().method(req.method().clone()).uri(target_uri.clone());
+    let mut builder = hyper::Request::builder()
+        .method(req.method().clone())
+        .uri(target_uri.clone());
     for (name, value) in req.headers() {
         if name == HOST && rewrite_host {
             continue;
@@ -355,7 +384,10 @@ async fn masquerade_proxy(req: &Request<RecvStream>, target_base: &str, rewrite_
         return match resp_builder.body(()) {
             Ok(resp) => {
                 let (parts, _) = resp.into_parts();
-                MasqResponse { parts, body: Bytes::new() }
+                MasqResponse {
+                    parts,
+                    body: Bytes::new(),
+                }
             }
             Err(_) => masquerade_404(),
         };
@@ -384,7 +416,10 @@ async fn masquerade_proxy(req: &Request<RecvStream>, target_base: &str, rewrite_
     match resp_builder.body(()) {
         Ok(resp) => {
             let (parts, _) = resp.into_parts();
-            MasqResponse { parts, body: body_bytes }
+            MasqResponse {
+                parts,
+                body: body_bytes,
+            }
         }
         Err(_) => masquerade_404(),
     }
@@ -396,7 +431,11 @@ async fn masquerade_proxy(req: &Request<RecvStream>, target_base: &str, rewrite_
 // h2 的探测流量。给这类流量一个看起来正常的网站响应即可，不需要完整实现
 // HTTP/1.1 keep-alive 等特性。
 
-async fn handle_h1_masquerade_only<S>(mut stream: S, peer: SocketAddr, _cfg: Arc<NaiveproxyConfig>) -> Result<()>
+async fn handle_h1_masquerade_only<S>(
+    mut stream: S,
+    peer: SocketAddr,
+    _cfg: Arc<NaiveproxyConfig>,
+) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
 {

@@ -44,7 +44,11 @@ pub async fn run(cfg: Arc<HttpConfig>) -> Result<()> {
     info!(
         "[http] Listening on {addr} (tls={}, auth={})",
         if tls_acceptor.is_some() { "yes" } else { "no" },
-        if cfg.users.is_empty() { "none" } else { "basic" },
+        if cfg.users.is_empty() {
+            "none"
+        } else {
+            "basic"
+        },
     );
 
     loop {
@@ -161,7 +165,9 @@ where
     ow.write_all(rewritten_line.as_bytes()).await?;
     for (k, v) in &headers {
         // Proxy-* 头是给代理自己看的，不透传给上游
-        if k.eq_ignore_ascii_case("proxy-authorization") || k.eq_ignore_ascii_case("proxy-connection") {
+        if k.eq_ignore_ascii_case("proxy-authorization")
+            || k.eq_ignore_ascii_case("proxy-connection")
+        {
             continue;
         }
         ow.write_all(format!("{k}: {v}\r\n").as_bytes()).await?;
@@ -203,7 +209,10 @@ async fn read_headers<S: AsyncRead + Unpin>(
             bail!("header too large");
         }
         let mut line = String::new();
-        let n = reader.read_line(&mut line).await.context("read header line")?;
+        let n = reader
+            .read_line(&mut line)
+            .await
+            .context("read header line")?;
         if n == 0 {
             bail!("connection closed while reading headers");
         }
@@ -222,13 +231,21 @@ async fn read_headers<S: AsyncRead + Unpin>(
 
 fn check_basic_auth(header: Option<&str>, cfg: &HttpConfig) -> bool {
     let Some(header) = header else { return false };
-    let Some(b64) = header.strip_prefix("Basic ") else { return false };
+    let Some(b64) = header.strip_prefix("Basic ") else {
+        return false;
+    };
     let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(b64.trim()) else {
         return false;
     };
-    let Ok(decoded) = String::from_utf8(decoded) else { return false };
-    let Some((user, pass)) = decoded.split_once(':') else { return false };
-    cfg.users.iter().any(|u| u.username == user && u.password == pass)
+    let Ok(decoded) = String::from_utf8(decoded) else {
+        return false;
+    };
+    let Some((user, pass)) = decoded.split_once(':') else {
+        return false;
+    };
+    cfg.users
+        .iter()
+        .any(|u| u.username == user && u.password == pass)
 }
 
 /// `CONNECT` 的 target 应形如 `host:port`；补默认端口保险起见做个基本校验。
@@ -243,9 +260,9 @@ fn normalize_connect_target(raw: &str) -> Result<String> {
 /// 也兼容只给了 origin-form（`/path`）+ Host 头的老式写法调用方在外层已处理不到，
 /// 这里只处理绝对 URI 形式（标准代理请求的写法）。
 fn parse_absolute_uri(raw: &str) -> Result<(String, String)> {
-    let rest = raw
-        .strip_prefix("http://")
-        .ok_or_else(|| anyhow::anyhow!("only absolute http:// URIs are supported as a plain proxy: {raw:?}"))?;
+    let rest = raw.strip_prefix("http://").ok_or_else(|| {
+        anyhow::anyhow!("only absolute http:// URIs are supported as a plain proxy: {raw:?}")
+    })?;
 
     let (authority, path_and_query) = match rest.find('/') {
         Some(idx) => (&rest[..idx], &rest[idx..]),

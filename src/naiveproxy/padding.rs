@@ -36,7 +36,9 @@ pub fn random_padding_value(min_len: usize, max_len: usize) -> String {
     const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
     let mut rng = rand::thread_rng();
     let len = rng.gen_range(min_len..=max_len);
-    (0..len).map(|_| CHARSET[rng.gen_range(0..CHARSET.len())] as char).collect()
+    (0..len)
+        .map(|_| CHARSET[rng.gen_range(0..CHARSET.len())] as char)
+        .collect()
 }
 
 fn random_padding_size() -> usize {
@@ -59,12 +61,19 @@ fn encode(original: &[u8]) -> Result<Bytes> {
 
 /// 从一个"小缓冲区 + h2 RecvStream 补给"的组合里读出恰好 `n` 字节。
 /// 只依赖 `RecvStream::data()`（稳定公开 API），不使用底层 poll_data。
-async fn read_exact_from_h2(recv: &mut RecvStream, carry: &mut BytesMut, n: usize) -> Result<Bytes> {
+async fn read_exact_from_h2(
+    recv: &mut RecvStream,
+    carry: &mut BytesMut,
+    n: usize,
+) -> Result<Bytes> {
     while carry.len() < n {
         match recv.data().await {
             Some(Ok(chunk)) => carry.extend_from_slice(&chunk),
             Some(Err(e)) => bail!("h2 recv error: {e}"),
-            None => bail!("h2 stream ended early (wanted {n} bytes, have {})", carry.len()),
+            None => bail!(
+                "h2 stream ended early (wanted {n} bytes, have {})",
+                carry.len()
+            ),
         }
     }
     Ok(carry.split_to(n).freeze())

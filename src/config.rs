@@ -141,10 +141,18 @@ pub struct TuicConfig {
     pub outbound_bind_ipv6: Option<std::net::Ipv6Addr>,
 }
 
-fn default_tuic_idle_time() -> Duration { Duration::from_secs(30) }
-fn default_tuic_auth_timeout() -> Duration { Duration::from_secs(3) }
-fn default_tuic_udp_timeout() -> Duration { Duration::from_secs(30) }
-fn default_tuic_max_udp_packet_size() -> usize { 65535 }
+fn default_tuic_idle_time() -> Duration {
+    Duration::from_secs(30)
+}
+fn default_tuic_auth_timeout() -> Duration {
+    Duration::from_secs(3)
+}
+fn default_tuic_udp_timeout() -> Duration {
+    Duration::from_secs(30)
+}
+fn default_tuic_max_udp_packet_size() -> usize {
+    65535
+}
 
 // ── Hysteria2 ─────────────────────────────────────────────────────────────────
 
@@ -400,8 +408,12 @@ impl ShadowsocksCipher {
             ShadowsocksCipher::Blake3Chacha20Poly1305 => 32,
         }
     }
-    pub fn salt_len(&self) -> usize { self.key_len() }
-    pub fn tag_len(&self) -> usize { 16 }
+    pub fn salt_len(&self) -> usize {
+        self.key_len()
+    }
+    pub fn tag_len(&self) -> usize {
+        16
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -470,8 +482,12 @@ pub struct WireGuardPeerConfig {
     pub dns: Vec<String>,
 }
 
-fn default_wg_mtu() -> u16 { 1420 }
-fn default_ss_cipher() -> ShadowsocksCipher { ShadowsocksCipher::Blake3Aes256Gcm }
+fn default_wg_mtu() -> u16 {
+    1420
+}
+fn default_ss_cipher() -> ShadowsocksCipher {
+    ShadowsocksCipher::Blake3Aes256Gcm
+}
 
 // ── Shared ────────────────────────────────────────────────────────────────────
 
@@ -483,7 +499,9 @@ pub struct LogConfig {
 
 impl Default for LogConfig {
     fn default() -> Self {
-        Self { level: default_log_level() }
+        Self {
+            level: default_log_level(),
+        }
     }
 }
 
@@ -531,11 +549,21 @@ impl BandwidthConfig {
     }
 }
 
-fn default_log_level() -> String { "info".to_string() }
-fn default_masquerade_type() -> String { "none".to_string() }
-fn default_transport_type() -> String { "tcp".to_string() }
-fn default_ws_path() -> String { "/".to_string() }
-fn default_xhttp_path() -> String { "/".to_string() }
+fn default_log_level() -> String {
+    "info".to_string()
+}
+fn default_masquerade_type() -> String {
+    "none".to_string()
+}
+fn default_transport_type() -> String {
+    "tcp".to_string()
+}
+fn default_ws_path() -> String {
+    "/".to_string()
+}
+fn default_xhttp_path() -> String {
+    "/".to_string()
+}
 
 pub fn load(path: &str) -> Result<Config> {
     let content = std::fs::read_to_string(Path::new(path))
