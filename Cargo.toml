@@ -1,8 +1,8 @@
 [package]
 name = "flux"
-version = "0.1.3"
+version = "0.1.0"
 edition = "2021"
-description = "A multi-protocol proxy server (Hysteria2 + VLESS + Reality + Shadowsocks 2022 + AnyTLS) in Rust"
+description = "A multi-protocol proxy server in Rust"
 license = "MIT"
 
 [[bin]]
