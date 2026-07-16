@@ -1,0 +1,121 @@
+[package]
+name = "flux"
+version = "0.1.3"
+edition = "2021"
+description = "A multi-protocol proxy server (Hysteria2 + VLESS + Reality + Shadowsocks 2022 + AnyTLS) in Rust"
+license = "MIT"
+
+[[bin]]
+name = "flux"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+
+# QUIC (Hysteria2)
+quinn = "0.11"
+quinn-proto = "0.11"
+
+# HTTP/3 (Hysteria2 auth uses H3)
+h3 = "0.0.8"
+h3-quinn = "0.0.10"
+
+# HTTP/2 (NaiveProxy inbound uses raw h2 CONNECT tunnels)
+h2 = "0.4"
+
+# http crate types (Request/Response/HeaderMap) used directly by the
+# NaiveProxy h2 CONNECT handler, shared with hyper 1.x / h2 0.4's http 1.x.
+http = "1"
+
+# TLS
+rustls = { version = "0.23", features = ["ring"] }
+rustls-pemfile = "2"
+tokio-rustls = "0.26"
+
+# Self-signed certificate generation
+rcgen = "0.13"
+
+# WebSocket (VLESS ws transport)
+tokio-tungstenite = "=0.20.1"
+futures-util = "0.3"
+
+# UUID (VLESS auth + TUIC user auth)
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# TUIC: humantime for duration parsing in config
+humantime-serde = "1"
+
+# TUIC: socket2 for UDP socket creation
+socket2 = "0.5"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+# Byte utilities
+bytes = "1"
+
+# Random number generation
+rand = "0.8"
+
+# Hyper HTTP server (used by XHTTP/splithttp transport)
+hyper = { version = "1", features = ["http1", "http2", "server", "client"] }
+hyper-util = { version = "0.1", features = ["tokio", "http1", "http2", "server", "server-auto", "client", "client-legacy"] }
+http-body-util = "0.1"
+http-body = "1"
+
+# Error handling
+anyhow = "1"
+thiserror = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Reality transport dependencies
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+base64 = "0.22"
+hex = "0.4"
+libc = "0.2"
+ring = "0.17"
+
+# AEAD ciphers (Shadowsocks 2022 + Reality)
+aes-gcm = "0.10"
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
+hmac = "0.12"
+sha2 = "0.10"
+sha3 = "0.10"
+sha1 = "0.10"
+md-5 = "0.10"
+crc32fast = "1"
+
+# Shadowsocks 2022: BLAKE3 key derivation
+blake3 = "1"
+
+# AnyTLS: SHA-256 password hashing
+# (sha2 already included above)
+
+
+# WireGuard server
+boringtun = { version = "0.7", default-features = false }
+ip_network = "0.4"
+ip_network_table = "0.2"
+smoltcp = { version = "0.11", default-features = false, features = [
+    "std",
+    "log",
+    "medium-ip",
+    "proto-ipv4",
+    "proto-ipv6",
+    "socket-tcp",
+    "socket-udp",
+    "async",
+] }
+
+[profile.release]
+strip         = "symbols"
+debug         = false
+lto           = "thin"
+codegen-units = 1

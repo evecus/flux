@@ -1,0 +1,486 @@
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║                        flux  配置文件模板                               ║
+# ╠══════════════════════════════════════════════════════════════════════════════╣
+# ║  • 每个节点用 [[node]] 声明，tag 必填且全局唯一                            ║
+# ║  • type 字段决定协议类型                                                   ║
+# ║  • 同一进程可同时运行多个节点，协议可以不同                                ║
+# ║  • 取消注释对应块即可启用                                                  ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+
+# ── 日志 ──────────────────────────────────────────────────────────────────────
+# level: trace | debug | info | warn | error，默认 info
+[log]
+level = "info"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 节点配置说明
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# 每个节点的基本结构：
+#
+#   [[node]]
+#   tag  = "my-node"      # 必填，全局唯一，用于日志标识
+#   type = "vless"        # 必填，协议类型（见下方各节）
+#   listen = "..."        # 必填，监听地址
+#   ... 协议相关字段 ...
+#
+#   [node.transport]      # 可选，传输层配置
+#   ...
+#
+#   [node.tls]            # 可选，TLS 层配置
+#   ...
+#
+# 支持的 type 值：
+#   vless | vmess | trojan | shadowsocks | hysteria2 | tuic | wireguard | anytls | socks
+#
+# 出口 IP（多公网 IP 服务器场景，wireguard 节点暂不支持）：
+#   outbound_bind_ipv4 = "203.0.113.10"   # 可选，出站时绑定到本机的这个 IPv4 地址
+#   outbound_bind_ipv6 = "2001:db8::1"    # 可选，出站时绑定到本机的这个 IPv6 地址
+#
+#   两者都不填：使用系统默认路由。
+#   只填一个：所有出站流量必须从这个地址族的 IP 走；目标域名没有对应
+#             地址族记录时拒绝连接（这种情况会打印 info 日志，不是故障）。
+#   两者都填：按目标地址的地址族自动选择对应的出口 IP。
+#   该 IP 必须已配置在本机网卡上，否则连接会失败。
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 1. Hysteria2   (QUIC + TLS，抗封锁能力强，适合高丢包环境)
+# ══════════════════════════════════════════════════════════════════════════════
+# 生成密码：flux generate password
+# 客户端推荐：Hysteria2 官方客户端 / sing-box / Clash.Meta
+#
+# 客户端示例（sing-box outbound）：
+#   type: hysteria2
+#   server: your.server.com
+#   server_port: 443
+#   password: your-strong-password-here
+#   tls:
+#     server_name: your.server.com
+#
+# ── 1-A: Hysteria2 + 证书 TLS ─────────────────────────────────────────────────
+# [[node]]
+# tag    = "hy2-main"
+# type   = "hysteria2"
+# listen = "0.0.0.0:443"
+#
+# [node.tls]
+# cert_path = "/etc/ssl/certs/server.crt"
+# key_path  = "/etc/ssl/private/server.key"
+#
+# [node.auth]
+# type     = "password"
+# password = "your-strong-password-here"
+#
+# # 带宽声明（强烈建议按实际带宽填写；不填会使用内置的保守默认值 up=200mbps / down=80mbps，
+# # 而不是回退到 CUBIC 拥塞控制。默认值是猜的，不一定适合你的链路，
+# # 强烈建议根据服务器和客户端两端的真实带宽显式填写，否则可能跑不满，或因估高而拥塞丢包）：
+# # up   = "服务器→客户端方向（即你的下载）带宽，取服务器出口与本地下载带宽中较小者"
+# # down = "客户端→服务器方向（即你的上传）带宽，取本地上传带宽与服务器入口带宽中较小者"
+# # [node.bandwidth]
+# # up   = "300 mbps"
+# # down = "50 mbps"
+#
+# # 伪装（可选）：
+# # [node.masquerade]
+# # type = "proxy"
+# # [node.masquerade.proxy]
+# # url          = "https://example.com"
+# # rewrite_host = true
+
+# ── 1-B: Hysteria2 + 自签名证书 ──────────────────────────────────────────────
+# [[node]]
+# tag    = "hy2-selfsigned"
+# type   = "hysteria2"
+# listen = "0.0.0.0:443"
+#
+# [node.tls]
+# self_signed_domain = "hy2.example.com"
+#
+# [node.auth]
+# type     = "password"
+# password = "your-strong-password-here"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 2. VLESS   (轻量无加密头，必须配合 TLS 或 Reality 使用)
+# ══════════════════════════════════════════════════════════════════════════════
+# 生成 UUID：flux generate uuid
+# 生成 Reality 密钥：flux generate reality-keypair
+#
+# 支持三种 TLS 模式：
+#   tls     — 标准 TLS，需要域名证书
+#   reality — 无需证书，借用真实网站 TLS 指纹
+#   （留空）— 明文，仅内网 / 已有外层 TLS 时使用
+#
+# 支持三种传输层：tcp（默认）| ws | xhttp
+#
+# ── 2-A: VLESS + 标准 TLS + TCP ──────────────────────────────────────────────
+# [[node]]
+# tag    = "vless-tls"
+# type   = "vless"
+# listen = "0.0.0.0:8443"
+# uuid   = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+#
+# [node.tls]
+# type      = "tls"
+# cert_path = "/etc/ssl/certs/server.crt"
+# key_path  = "/etc/ssl/private/server.key"
+
+# ── 2-B: VLESS + Reality ──────────────────────────────────────────────────────
+# 注意：服务端只需 private_key；public_key 仅填入客户端配置
+# 生成密钥：flux generate reality-keypair
+#
+# [[node]]
+# tag    = "vless-reality"
+# type   = "vless"
+# listen = "0.0.0.0:443"
+# uuid   = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+#
+# [node.tls]
+# type        = "reality"
+# private_key = "YOUR_X25519_PRIVATE_KEY_BASE64URL"
+# short_ids   = ["deadbeef", "cafebabe"]   # 任意 1–8 字节 hex 串
+# dest        = "www.microsoft.com:443"    # 借用 TLS 指纹的真实站点
+# server_name = "www.microsoft.com"
+
+# ── 2-C: VLESS + TLS + WebSocket（适合套 CDN）────────────────────────────────
+# [[node]]
+# tag    = "vless-ws"
+# type   = "vless"
+# listen = "0.0.0.0:443"
+# uuid   = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+#
+# [node.transport]
+# type    = "ws"
+# ws_path = "/vless"
+# ws_host = "your.domain.com"   # 可选：严格校验 Host 头
+#
+# [node.tls]
+# type      = "tls"
+# cert_path = "/etc/ssl/certs/server.crt"
+# key_path  = "/etc/ssl/private/server.key"
+
+# ── 2-D: VLESS + TLS + XHTTP ─────────────────────────────────────────────────
+# [[node]]
+# tag    = "vless-xhttp"
+# type   = "vless"
+# listen = "0.0.0.0:443"
+# uuid   = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+#
+# [node.transport]
+# type       = "xhttp"
+# xhttp_path = "/stream"
+# xhttp_host = "your.domain.com"   # 可选
+#
+# [node.tls]
+# type      = "tls"
+# cert_path = "/etc/ssl/certs/server.crt"
+# key_path  = "/etc/ssl/private/server.key"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 3. VMess   (带 AES/ChaCha 头部加密，兼容性最广)
+# ══════════════════════════════════════════════════════════════════════════════
+# 支持的传输层：tcp | ws | xhttp
+# 支持可选 TLS 层（不配置则明文）
+#
+# ── 3-A: VMess + TLS + TCP ───────────────────────────────────────────────────
+# [[node]]
+# tag    = "vmess-tls"
+# type   = "vmess"
+# listen = "0.0.0.0:9443"
+# uuid   = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+#
+# [node.tls]
+# cert_path = "/etc/ssl/certs/server.crt"
+# key_path  = "/etc/ssl/private/server.key"
+
+# ── 3-B: VMess + TLS + WebSocket ─────────────────────────────────────────────
+# [[node]]
+# tag    = "vmess-ws"
+# type   = "vmess"
+# listen = "0.0.0.0:443"
+# uuid   = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+#
+# [node.transport]
+# type    = "ws"
+# ws_path = "/vmess"
+# ws_host = "your.domain.com"
+#
+# [node.tls]
+# cert_path = "/etc/ssl/certs/server.crt"
+# key_path  = "/etc/ssl/private/server.key"
+
+# ── 3-C: VMess 明文（内网 / 已有外层加密时）──────────────────────────────────
+# [[node]]
+# tag    = "vmess-plain"
+# type   = "vmess"
+# listen = "0.0.0.0:10000"
+# uuid   = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 4. Trojan   (HTTPS 伪装，流量特征与正常 HTTPS 一致)
+# ══════════════════════════════════════════════════════════════════════════════
+# 支持的传输层：tcp | ws | xhttp
+#
+# ── 4-A: Trojan + TLS + TCP ──────────────────────────────────────────────────
+# [[node]]
+# tag      = "trojan-tls"
+# type     = "trojan"
+# listen   = "0.0.0.0:10443"
+# password = "your-strong-password-here"
+#
+# [node.tls]
+# cert_path = "/etc/ssl/certs/server.crt"
+# key_path  = "/etc/ssl/private/server.key"
+
+# ── 4-B: Trojan + TLS + WebSocket ────────────────────────────────────────────
+# [[node]]
+# tag      = "trojan-ws"
+# type     = "trojan"
+# listen   = "0.0.0.0:443"
+# password = "your-strong-password-here"
+#
+# [node.transport]
+# type    = "ws"
+# ws_path = "/trojan"
+# ws_host = "your.domain.com"
+#
+# [node.tls]
+# cert_path = "/etc/ssl/certs/server.crt"
+# key_path  = "/etc/ssl/private/server.key"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 5. Shadowsocks 2022   (2022-blake3-* 系列，现代高性能 AEAD)
+# ══════════════════════════════════════════════════════════════════════════════
+# ⚠  密码必须是 base64 编码的随机密钥字节，不是任意字符串。
+#
+# 生成密钥：
+#   2022-blake3-aes-128-gcm       →  openssl rand -base64 16
+#   2022-blake3-aes-256-gcm       →  openssl rand -base64 32
+#   2022-blake3-chacha20-poly1305 →  openssl rand -base64 32
+#
+# ── 5-A: Shadowsocks 2022 + 纯 TCP ───────────────────────────────────────────
+# [[node]]
+# tag      = "ss-tcp"
+# type     = "shadowsocks"
+# listen   = "0.0.0.0:8388"
+# method   = "2022-blake3-aes-256-gcm"
+# password = "REPLACE_WITH_BASE64_32_BYTES="   # openssl rand -base64 32
+
+# ── 5-B: Shadowsocks 2022 + WebSocket + TLS ──────────────────────────────────
+# [[node]]
+# tag      = "ss-ws"
+# type     = "shadowsocks"
+# listen   = "0.0.0.0:443"
+# method   = "2022-blake3-aes-256-gcm"
+# password = "REPLACE_WITH_BASE64_32_BYTES="
+#
+# [node.transport]
+# type    = "ws"
+# ws_path = "/shadow"
+# ws_host = "your.domain.com"
+#
+# [node.tls]
+# cert_path = "/etc/ssl/certs/server.crt"
+# key_path  = "/etc/ssl/private/server.key"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 6. TUIC v5   (QUIC 多路复用，低延迟 UDP 转发)
+# ══════════════════════════════════════════════════════════════════════════════
+# 注意：TUIC 使用 QUIC，客户端 ALPN 必须包含 "h3"。
+# 支持多用户（UUID → 密码 映射）。
+# 生成 UUID：flux generate uuid
+#
+# [[node]]
+# tag    = "tuic-main"
+# type   = "tuic"
+# listen = "0.0.0.0:7443"
+#
+# [node.users]
+# "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" = "user1-password"
+# "yyyyyyyy-yyyy-yyyy-yyyy-yyyyyyyyyyyy" = "user2-password"
+#
+# [node.tls]
+# cert_path = "/etc/ssl/certs/server.crt"
+# key_path  = "/etc/ssl/private/server.key"
+#
+# # 性能调优（以下均为默认值，可省略）：
+# # max_idle_time       = "30s"
+# # auth_timeout        = "3s"
+# # udp_timeout         = "30s"
+# # udp_relay_ipv6      = false
+# # max_udp_packet_size = 65535
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 7. AnyTLS   (TLS 连接复用 + 流量 padding 混淆)
+# ══════════════════════════════════════════════════════════════════════════════
+# TLS 是必须的（协议本身不提供加密层）。
+#
+# [[node]]
+# tag      = "anytls-main"
+# type     = "anytls"
+# listen   = "0.0.0.0:8443"
+# password = "your-strong-password"
+#
+# [node.tls]
+# cert_path = "/etc/ssl/certs/server.crt"
+# key_path  = "/etc/ssl/private/server.key"
+#
+# # padding_scheme（可选，留空使用内置默认方案）：
+# # padding_scheme = """
+# # stop=8
+# # 0=30-30
+# # 1=100-400
+# # 2=400-500,c,500-1000,c,500-1000,c,500-1000,c,500-1000
+# # 3=9-9,500-1000
+# # 4=500-1000
+# # 5=500-1000
+# # 6=500-1000
+# # 7=500-1000
+# # """
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 8. WireGuard   (用户态 VPN，全流量隧道，基于 boringtun + smoltcp)
+# ══════════════════════════════════════════════════════════════════════════════
+# 生成密钥：flux generate wireguard-keypair
+#
+# 单个 peer 用 [node.peers]，多个 peer 用 [[node.peers]]
+#
+# ── 8-A: 单 peer ──────────────────────────────────────────────────────────────
+# [[node]]
+# tag            = "wg-main"
+# type           = "wireguard"
+# listen         = "0.0.0.0:51820"
+# private_key    = "SERVER_PRIVATE_KEY_BASE64"
+# server_address = ["10.0.0.1/24"]
+# # mtu          = 1420
+#
+# [node.peers]
+# public_key  = "CLIENT_PUBLIC_KEY_BASE64"
+# allowed_ips = ["10.0.0.2/32"]
+# # pre_shared_key     = "PSK_BASE64"   # 可选：后量子增强
+# # keepalive_interval = 25
+
+# ── 8-B: 多 peer ──────────────────────────────────────────────────────────────
+# [[node]]
+# tag            = "wg-multi"
+# type           = "wireguard"
+# listen         = "0.0.0.0:51820"
+# private_key    = "SERVER_PRIVATE_KEY_BASE64"
+# server_address = ["10.0.0.1/24"]
+#
+# [[node.peers]]
+# public_key  = "CLIENT1_PUBLIC_KEY_BASE64"
+# allowed_ips = ["10.0.0.2/32"]
+#
+# [[node.peers]]
+# public_key  = "CLIENT2_PUBLIC_KEY_BASE64"
+# allowed_ips = ["10.0.0.3/32"]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 9. SOCKS5   (标准 SOCKS5 代理，RFC 1928 / RFC 1929)
+# ══════════════════════════════════════════════════════════════════════════════
+# 单个用户用 [node.users]，多个用户用 [[node.users]]
+#
+# ── 9-A: SOCKS5 无认证 ───────────────────────────────────────────────────────
+# [[node]]
+# tag    = "socks-local"
+# type   = "socks"
+# listen = "0.0.0.0:1080"
+
+# ── 9-B: SOCKS5 单用户 ───────────────────────────────────────────────────────
+# [[node]]
+# tag    = "socks-auth"
+# type   = "socks"
+# listen = "0.0.0.0:1080"
+#
+# [node.users]
+# username = "alice"
+# password = "s3cr3t"
+
+# ── 9-C: SOCKS5 多用户 ───────────────────────────────────────────────────────
+# [[node]]
+# tag    = "socks-multi"
+# type   = "socks"
+# listen = "0.0.0.0:1081"
+#
+# [[node.users]]
+# username = "alice"
+# password = "s3cr3t"
+#
+# [[node.users]]
+# username = "bob"
+# password = "another-password"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 多节点示例（同时运行多个不同协议节点）
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# [[node]]
+# tag    = "us-vless-reality"
+# type   = "vless"
+# listen = "0.0.0.0:443"
+# uuid   = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+# [node.tls]
+# type        = "reality"
+# private_key = "YOUR_X25519_PRIVATE_KEY_BASE64URL"
+# short_ids   = ["deadbeef"]
+# dest        = "www.microsoft.com:443"
+# server_name = "www.microsoft.com"
+#
+# [[node]]
+# tag      = "us-trojan-cdn"
+# type     = "trojan"
+# listen   = "0.0.0.0:8443"
+# password = "your-strong-password"
+# [node.transport]
+# type    = "ws"
+# ws_path = "/trojan"
+# [node.tls]
+# cert_path = "/etc/ssl/certs/server.crt"
+# key_path  = "/etc/ssl/private/server.key"
+#
+# [[node]]
+# tag    = "local-socks"
+# type   = "socks"
+# listen = "127.0.0.1:1080"
+#
+# # 多 IP 出站示例：本机有 203.0.113.10 / 203.0.113.20 两个 IPv4，
+# # 以及一个 IPv6 地址 2001:db8::1
+#
+# # 示例 1：只绑 IPv4 —— 该节点所有流量都从这个 IPv4 出站，
+# #         访问纯 IPv6 目标时会被拒绝（这是预期行为，非故障）
+# [[node]]
+# tag                = "us-vless-ip1"
+# type               = "vless"
+# listen             = "0.0.0.0:8443"
+# uuid               = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+# outbound_bind_ipv4 = "203.0.113.10"
+#
+# # 示例 2：另一个节点绑另一个 IPv4，用于区分不同用途/落地 IP
+# [[node]]
+# tag                = "us-vless-ip2"
+# type               = "vless"
+# listen             = "0.0.0.0:8444"
+# uuid               = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+# outbound_bind_ipv4 = "203.0.113.20"
+#
+# # 示例 3：同时绑定 IPv4 + IPv6 —— 访问 IPv4 目标走 ipv4 出口，
+# #         访问 IPv6 目标走 ipv6 出口，自动按目标地址族选择
+# [[node]]
+# tag                = "us-vless-dualstack"
+# type               = "vless"
+# listen             = "0.0.0.0:8445"
+# uuid               = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+# outbound_bind_ipv4 = "203.0.113.10"
+# outbound_bind_ipv6 = "2001:db8::1"
