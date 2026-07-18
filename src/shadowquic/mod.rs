@@ -140,7 +140,7 @@ async fn handle_udp(
 
     let upstream = Arc::new(UdpPair {
         v4: UdpSocket::from_std(socket_v4)?,
-        v6: socket_v6.map(|s| UdpSocket::from_std(s).ok()).flatten(),
+        v6: socket_v6.and_then(|s| UdpSocket::from_std(s).ok()),
     });
 
     // DNS 反向映射：resolved SocketAddr -> 原始 SocksAddr
