@@ -5,6 +5,7 @@ mod generate;
 mod http;
 mod hysteria2;
 mod naiveproxy;
+mod shadowquic;
 mod shadowsocks;
 mod socks;
 mod trojan;
@@ -66,7 +67,7 @@ async fn main() -> Result<()> {
         anyhow::bail!(
             "no nodes configured — add at least one [[node]] section with type = \"vless\" / \
              \"vmess\" / \"trojan\" / \"shadowsocks\" / \"hysteria2\" / \"tuic\" / \
-             \"wireguard\" / \"anytls\" / \"socks\" / \"http\" / \"naiveproxy\""
+             \"wireguard\" / \"anytls\" / \"socks\" / \"http\" / \"naiveproxy\" / \"shadowquic\""
         );
     }
 
@@ -240,6 +241,22 @@ async fn main() -> Result<()> {
                 );
                 handles.push(tokio::spawn(async move {
                     if let Err(e) = naiveproxy::run(c).await {
+                        tracing::error!("[{tag}] server exited: {e:#}");
+                    }
+                }));
+            }
+
+            // ── ShadowQuic ─────────────────────────────────────────────────────
+            config::NodeInner::Shadowquic(c) => {
+                let c = Arc::new(c);
+                info!(
+                    "[{tag}] shadowquic, listen: {}, users: {}, jls_upstream: {}",
+                    c.listen,
+                    c.users.len(),
+                    c.jls_upstream,
+                );
+                handles.push(tokio::spawn(async move {
+                    if let Err(e) = shadowquic::run(c).await {
                         tracing::error!("[{tag}] server exited: {e:#}");
                     }
                 }));
