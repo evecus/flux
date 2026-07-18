@@ -85,6 +85,7 @@ pub enum NodeInner {
     Socks(SocksConfig),
     Http(HttpConfig),
     Naiveproxy(NaiveproxyConfig),
+    Shadowquic(ShadowquicConfig),
 }
 
 // ── SOCKS5 ────────────────────────────────────────────────────────────────────
@@ -455,6 +456,122 @@ pub struct AnyTlsConfig {
     /// 出站时绑定的本地 IPv6 出口 IP，规则同 `outbound_bind_ipv4`。
     #[serde(default)]
     pub outbound_bind_ipv6: Option<std::net::Ipv6Addr>,
+}
+
+// ── ShadowQuic ───────────────────────────────────────────────────────────────
+
+/// ShadowQuic 服务端配置（参考 shadowquic crate `ShadowQuicServerCfg`）。
+///
+/// ShadowQuic 是 0-RTT QUIC + JLS SNI 伪装的代理协议：
+/// - 0-RTT：首包即数据，降低握手延迟
+/// - JLS：SNI 伪装，未认证/不匹配的流量被透明转发到 `jls_upstream`（伪装站），
+///   探测者看到的是一个正常的 HTTPS 站点
+/// - 用户认证：username/password 通过 JLS 协议层完成，非明文
+///
+/// 配置示例：
+/// ```toml
+/// [[node]]
+/// type = "shadowquic"
+/// tag = "sq-in"
+/// listen = "0.0.0.0:443"
+/// jls_upstream = "google.com:443"      # 伪装上游（必须是真实 HTTPS 站点）
+/// server_name = "google.com"            # SNI，留空则从 jls_upstream 推断
+///
+/// [[node.users]]
+/// username = "user1"
+/// password = "pass1"
+/// ```
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ShadowquicConfig {
+    pub listen: String,
+
+    /// JLS 用户列表（username/password 必须与客户端一致）
+    #[serde(default, deserialize_with = "one_or_many_opt")]
+    pub users: Vec<SocksUser>,
+
+    /// JLS 伪装上游地址（host:port），未认证流量会被转发到此目标。
+    /// 必须是一个真实的 HTTPS 站点（如 "google.com:443"），用于抵御主动探测。
+    pub jls_upstream: String,
+
+    /// SNI 域名。留空则从 `jls_upstream` 的 host 部分推断。
+    /// 必须与客户端 `server_name` 一致。
+    #[serde(default)]
+    pub server_name: Option<String>,
+
+    /// TLS ALPN，默认 ["h3"]，必须与客户端有交集
+    #[serde(default = "default_sq_alpn")]
+    pub alpn: Vec<String>,
+
+    /// 启用 0-RTT 握手（默认 true）
+    #[serde(default = "default_sq_zero_rtt")]
+    pub zero_rtt: bool,
+
+    /// 拥塞控制算法：`"bbr"`（默认）、`"cubic"`、`"new-reno"`、`"brutal"`
+    #[serde(default = "default_sq_congestion_control")]
+    pub congestion_control: String,
+
+    /// 初始 MTU（≥1200，默认 1300）
+    #[serde(default = "default_sq_initial_mtu")]
+    pub initial_mtu: u16,
+
+    /// 最小 MTU（必须小于 initial_mtu，≥1200，默认 1290）
+    #[serde(default = "default_sq_min_mtu")]
+    pub min_mtu: u16,
+
+    /// 启用 QUIC GSO，默认 true
+    #[serde(default = "default_sq_gso")]
+    pub gso: bool,
+
+    /// 启用 MTU 自动发现，默认 true
+    #[serde(default = "default_sq_mtu_discovery")]
+    pub mtu_discovery: bool,
+
+    /// 启用 MTU 黑洞检测，默认 false
+    #[serde(default = "default_sq_blackhole_detection")]
+    pub blackhole_detection: bool,
+
+    /// 是否允许 UDP6 中继（类似 TUIC 的 udp_relay_ipv6），默认 false
+    #[serde(default)]
+    pub udp_relay_ipv6: bool,
+
+    /// UDP 会话空闲超时，默认 30s
+    #[serde(default = "default_sq_udp_timeout", with = "humantime_serde")]
+    pub udp_timeout: Duration,
+
+    /// 出站时绑定的本地 IPv4 出口 IP（多公网 IP 服务器场景）
+    #[serde(default)]
+    pub outbound_bind_ipv4: Option<std::net::Ipv4Addr>,
+    /// 出站时绑定的本地 IPv6 出口 IP，规则同 `outbound_bind_ipv4`
+    #[serde(default)]
+    pub outbound_bind_ipv6: Option<std::net::Ipv6Addr>,
+}
+
+fn default_sq_alpn() -> Vec<String> {
+    vec!["h3".into()]
+}
+fn default_sq_zero_rtt() -> bool {
+    true
+}
+fn default_sq_congestion_control() -> String {
+    "bbr".into()
+}
+fn default_sq_initial_mtu() -> u16 {
+    1300
+}
+fn default_sq_min_mtu() -> u16 {
+    1290
+}
+fn default_sq_gso() -> bool {
+    true
+}
+fn default_sq_mtu_discovery() -> bool {
+    true
+}
+fn default_sq_blackhole_detection() -> bool {
+    false
+}
+fn default_sq_udp_timeout() -> Duration {
+    Duration::from_secs(30)
 }
 
 // ── WireGuard ─────────────────────────────────────────────────────────────────
