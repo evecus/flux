@@ -12,6 +12,11 @@ use crate::common::tls::standard as shared_tls;
 use crate::common::transport::websocket as shared_ws;
 use crate::common::transport::xhttp::{XhttpConfig, XhttpServer};
 use crate::config::TrojanConfig;
+use crate::vless::protocol::packetaddr_relay;
+
+/// Trojan cmd 字节：1=TCP，2=UDP（与 Xray trojan 一致）
+const CMD_TCP: u8 = 0x01;
+const CMD_UDP: u8 = 0x02;
 
 pub async fn run(cfg: Arc<TrojanConfig>) -> Result<()> {
     let tls_acceptor = if let Some(t) = &cfg.tls {
@@ -140,16 +145,31 @@ async fn process<S: AsyncRead + AsyncWrite + Unpin + ?Sized>(
     password: &str,
     bind_ip: OutboundBind,
 ) -> Result<()> {
-    let target = decode_trojan(io, password).await?;
-    info!("[trojan] {peer} -> {target}");
-    let outbound = shared_net::dial_tcp(&target, bind_ip).await?;
-    relay(io, outbound).await
+    let (cmd, target) = decode_trojan(io, password).await?;
+    match cmd {
+        CMD_TCP => {
+            info!("[trojan] {peer} -> {target} (tcp)");
+            let outbound = shared_net::dial_tcp(&target, bind_ip).await?;
+            relay(io, outbound).await
+        }
+        CMD_UDP => {
+            info!("[trojan] {peer} -> {target} (udp)");
+            // Trojan 无 UDP 响应头，body 直接是 packetaddr 帧流，
+            // 共用 VLESS 提取的 packetaddr_relay。`&mut S` 同样满足
+            // `AsyncRead + AsyncWrite + Unpin` 约束。
+            packetaddr_relay(io, peer, bind_ip).await
+        }
+        other => bail!("trojan: unsupported cmd {other:#x}"),
+    }
 }
 
 trait AsyncReadWrite: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> AsyncReadWrite for T {}
 
-async fn decode_trojan<S: AsyncRead + Unpin + ?Sized>(s: &mut S, password: &str) -> Result<String> {
+async fn decode_trojan<S: AsyncRead + Unpin + ?Sized>(
+    s: &mut S,
+    password: &str,
+) -> Result<(u8, String)> {
     let mut line = Vec::new();
     loop {
         let b = s.read_u8().await?;
@@ -167,8 +187,8 @@ async fn decode_trojan<S: AsyncRead + Unpin + ?Sized>(s: &mut S, password: &str)
         bail!("invalid password");
     }
     let cmd = s.read_u8().await?;
-    if cmd != 1 {
-        bail!("only tcp supported");
+    if cmd != CMD_TCP && cmd != CMD_UDP {
+        bail!("trojan: unsupported cmd {cmd:#x}");
     }
     let atyp = s.read_u8().await?;
     let host = match atyp {
@@ -193,7 +213,7 @@ async fn decode_trojan<S: AsyncRead + Unpin + ?Sized>(s: &mut S, password: &str)
     let port = s.read_u16().await?;
     let mut crlf = [0; 2];
     s.read_exact(&mut crlf).await?;
-    Ok(format!("{host}:{port}"))
+    Ok((cmd, format!("{host}:{port}")))
 }
 
 async fn relay<S: AsyncRead + AsyncWrite + Unpin + ?Sized>(
