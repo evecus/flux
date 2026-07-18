@@ -18,6 +18,15 @@ tokio-util = { version = "0.7", features = ["codec"] }
 quinn = "0.11"
 quinn-proto = "0.11"
 
+# ShadowQuic: 0-RTT QUIC + JLS SNI 伪装。内部使用 quinn-jls（JLS 补丁版 quinn），
+# 与上方标准 quinn 0.11 互不冲突（不同的 crate 名）。
+# Pin quinn-jls / quinn-proto-jls 到 0.3.4 / 0.3.5：
+# shadowquic 0.3.11 编写时基于这两个版本，quinn-*-jls 0.3.6 更改了
+# congestion::Controller trait 签名（on_congestion_event 5→6 参数）导致编译失败。
+shadowquic = { version = "0.3.7", default-features = false, features = ["shadowquic-quinn", "ring"] }
+quinn-jls = { version = "=0.3.4", default-features = false }
+quinn-proto-jls = { version = "=0.3.5", default-features = false }
+
 # HTTP/3 (Hysteria2 auth uses H3)
 h3 = "0.0.8"
 h3-quinn = "0.0.10"
