@@ -20,7 +20,7 @@
 //!
 //! ### Response body (same chunk format, but using responseBodyKey/IV)
 
-use std::{net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use aes_gcm::{
     aead::{Aead, KeyInit, Payload},
@@ -30,16 +30,18 @@ use anyhow::{anyhow, bail, Context, Result};
 use sha2::{Digest, Sha256};
 use sha3::digest::{ExtendableOutput, Update, XofReader};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio_rustls::TlsAcceptor;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::common::net::{self as shared_net, OutboundBind};
 use crate::common::tls::standard as shared_tls;
 use crate::common::transport::websocket as shared_ws;
 use crate::common::transport::xhttp::{XhttpConfig, XhttpServer};
 use crate::config::VmessConfig;
-use crate::vless::protocol::parse_uuid;
+use crate::vless::protocol::{
+    encode_packet_frame, parse_packet_frame, parse_uuid, packetaddr_relay,
+};
 
 // ── KDF salts (matching Xray consts) ─────────────────────────────────────────
 const KDF_ROOT: &[u8] = b"VMess AEAD KDF";
@@ -66,6 +68,10 @@ const SEC_CHACHA20: u8 = 0x04;
 const SEC_AUTO: u8 = 0x05; // server treats as AES-128-GCM
 
 const CHUNK_SIZE: usize = 8192;
+
+// Request command bytes (mirrors Xray VMess `RequestCommand`)
+const CMD_TCP: u8 = 0x01;
+const CMD_UDP: u8 = 0x02;
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
@@ -212,12 +218,26 @@ async fn process<S: AsyncRead + AsyncWrite + Unpin + Send + ?Sized>(
         .await
         .context("decode header")?;
     info!(
-        "[vmess] {peer} -> {} (sec={:#x} opt={:#x})",
-        req.target, req.security, req.option
+        "[vmess] {peer} -> {} (cmd={:#x} sec={:#x} opt={:#x})",
+        req.target, req.cmd, req.security, req.option
     );
 
-    let outbound = shared_net::dial_tcp(&req.target, bind_ip).await?;
+    // 响应头必须在分流前写出（VMess 协议要求）。
     encode_response_header(io, &req).await?;
+
+    match req.cmd {
+        CMD_TCP => relay_tcp(io, &req, bind_ip).await,
+        CMD_UDP => relay_udp(io, peer, &req, bind_ip).await,
+        other => bail!("vmess: unsupported cmd {other:#x}"),
+    }
+}
+
+async fn relay_tcp<S: AsyncRead + AsyncWrite + Unpin + Send + ?Sized>(
+    io: &mut S,
+    req: &VmessRequest,
+    bind_ip: OutboundBind,
+) -> Result<()> {
+    let outbound = shared_net::dial_tcp(&req.target, bind_ip).await?;
 
     let (mut out_r, mut out_w) = outbound.into_split();
     let (mut in_r, in_w) = tokio::io::split(io);
@@ -257,6 +277,127 @@ async fn process<S: AsyncRead + AsyncWrite + Unpin + Send + ?Sized>(
     Ok(())
 }
 
+// ── UDP relay (VMess cmd=0x02, packetaddr over AEAD chunks) ──────────────────
+//
+// VMess UDP 把每个 packetaddr 帧作为一个明文 chunk 加解密，复用 `ChunkCodec`。
+// sec=none 且无 chunk stream 的极少数情况下，body 就是裸 packetaddr 帧流，
+// 直接复用 VLESS/Trojan 的 `packetaddr_relay`。
+
+const VMESS_UDP_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+const VMESS_UDP_MAX_PACKET: usize = 65535;
+
+async fn relay_udp<S: AsyncRead + AsyncWrite + Unpin + Send + ?Sized>(
+    io: &mut S,
+    peer: SocketAddr,
+    req: &VmessRequest,
+    bind_ip: OutboundBind,
+) -> Result<()> {
+    let opt = req.option;
+    let sec = req.security;
+
+    // sec=none + 无 chunk stream：裸 packetaddr 流，复用共享 relay。
+    if sec == SEC_NONE && opt & OPT_CHUNK_STREAM == 0 {
+        return packetaddr_relay(io, peer, bind_ip).await;
+    }
+
+    let socket_v4 = shared_net::bind_udp(bind_ip, false).await?;
+    let socket_v6 = shared_net::bind_udp(bind_ip, true).await.ok();
+
+    let (mut in_r, mut in_w) = tokio::io::split(io);
+
+    // 上行：解密 chunk → 解析 packetaddr 帧 → send_to
+    // 用借用而非 `async move`，以便 select! 之后再 shutdown `in_w`。
+    let up_k = req.request_body_key;
+    let up_v = req.request_body_iv;
+    let uplink = async {
+        let mut codec = ChunkCodec::new(up_k, up_v, opt, sec);
+        loop {
+            let plain = match codec.read_chunk(&mut in_r).await {
+                Ok(Some(p)) => p,
+                Ok(None) => {
+                    debug!("[vmess] {peer} udp uplink EOF chunk");
+                    return;
+                }
+                Err(e) => {
+                    debug!("[vmess] {peer} udp uplink read: {e}");
+                    return;
+                }
+            };
+            let (target, payload) = match parse_packet_frame(&plain) {
+                Ok(t) => t,
+                Err(e) => {
+                    debug!("[vmess] {peer} udp parse frame: {e}");
+                    continue;
+                }
+            };
+            let sock = match target {
+                SocketAddr::V4(_) => &socket_v4,
+                SocketAddr::V6(_) => match &socket_v6 {
+                    Some(s) => s,
+                    None => {
+                        debug!("[vmess] {peer} udp drop v6 target {target} (no v6 socket)");
+                        continue;
+                    }
+                },
+            };
+            if let Err(e) = sock.send_to(payload, target).await {
+                debug!("[vmess] {peer} udp send_to {target}: {e}");
+            }
+        }
+    };
+
+    // 下行：recv_from → 编码 packetaddr 帧 → 加密为 chunk 写回
+    let dn_k = req.response_body_key;
+    let dn_v = req.response_body_iv;
+    let downlink = async {
+        let mut codec = ChunkCodec::new(dn_k, dn_v, opt, sec);
+        loop {
+            let (from, payload) = match &socket_v6 {
+                Some(v6) => tokio::select! {
+                    r = recv_one(&socket_v4) => match r { Ok(v) => v, Err(e) => { debug!("[vmess] {peer} udp recv v4: {e}"); return; } },
+                    r = recv_one(v6)         => match r { Ok(v) => v, Err(e) => { debug!("[vmess] {peer} udp recv v6: {e}"); return; } },
+                },
+                None => match recv_one(&socket_v4).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        debug!("[vmess] {peer} udp recv v4: {e}");
+                        return;
+                    }
+                },
+            };
+            let frame = match encode_packet_frame(from, &payload) {
+                Ok(f) => f,
+                Err(e) => {
+                    debug!("[vmess] {peer} udp encode frame: {e}");
+                    continue;
+                }
+            };
+            if let Err(e) = codec.write_chunk(&mut in_w, &frame).await {
+                debug!("[vmess] {peer} udp write_chunk: {e}");
+                return;
+            }
+        }
+    };
+
+    let idle = tokio::time::sleep(VMESS_UDP_IDLE_TIMEOUT);
+    tokio::select! {
+        _ = uplink => debug!("[vmess] {peer} udp uplink closed"),
+        _ = downlink => debug!("[vmess] {peer} udp downlink closed"),
+        _ = idle => debug!("[vmess] {peer} udp idle timeout"),
+    }
+    let _ = in_w.shutdown().await;
+    debug!("[vmess] {peer} udp relay closed");
+    Ok(())
+}
+
+/// 从 `sock` 收一个 UDP 包，自带 buffer（避免外层 select! 两分支同时借用）。
+async fn recv_one(sock: &UdpSocket) -> std::io::Result<(SocketAddr, Vec<u8>)> {
+    let mut buf = vec![0u8; VMESS_UDP_MAX_PACKET];
+    let (n, from) = sock.recv_from(&mut buf).await?;
+    buf.truncate(n);
+    Ok((from, buf))
+}
+
 // ── Uplink: decrypt AES-GCM chunks → target ───────────────────────────────────
 //
 // Xray chunk format (with masking + padding):
@@ -266,6 +407,9 @@ async fn process<S: AsyncRead + AsyncWrite + Unpin + Send + ?Sized>(
 //
 // ShakeSizeParser.next() is called ONCE for padding (NextPaddingLen),
 // then ONCE for size mask (Decode). Order matters!
+//
+// `relay_up`/`relay_down` 共享 `ChunkCodec` 的分块加解密逻辑；VMess UDP
+// 通过同一 codec 把每个 packetaddr 帧作为一个明文 chunk 加解密。
 
 async fn relay_up<R, W>(
     r: &mut R,
@@ -283,105 +427,8 @@ where
         tokio::io::copy(r, w).await?;
         return Ok(());
     }
-
-    let use_masking = opt & OPT_CHUNK_MASKING != 0;
-    let use_padding = opt & OPT_GLOBAL_PADDING != 0;
-    let use_auth_len = opt & OPT_AUTH_LEN != 0;
-    let auth_len_key = use_auth_len.then(|| kdf16(&key, &[b"auth_len"]));
-
-    // Single Shake128 instance — same as Xray's ShakeSizeParser
-    let mut shake = use_masking.then(|| Shake128Reader::new(&iv));
-    let mut count: u16 = 0;
-
-    loop {
-        // Step 1: read padding length (if GlobalPadding)
-        // In Xray: padding = sizeParser.NextPaddingLen() BEFORE Decode
-        let pad_len: usize = if use_padding {
-            shake
-                .as_mut()
-                .map(|s| (s.next_u16() % 64) as usize)
-                .unwrap_or(0)
-        } else {
-            0
-        };
-
-        // Step 2: read & decode size field
-        let total_len: usize = if use_auth_len {
-            let mut buf = [0u8; 18]; // 2 data + 16 tag
-            r.read_exact(&mut buf).await?;
-            let nonce = chunk_nonce(&iv, count);
-            let lc = Aes128Gcm::new_from_slice(&auth_len_key.unwrap())?;
-            let plain = lc
-                .decrypt(Nonce::from_slice(&nonce), buf.as_ref())
-                .map_err(|_| anyhow!("auth_len decrypt"))?;
-            count = count.wrapping_add(1);
-            u16::from_be_bytes([plain[0], plain[1]]) as usize
-        } else {
-            let mut buf = [0u8; 2];
-            r.read_exact(&mut buf).await?;
-            let raw = u16::from_be_bytes(buf);
-            if let Some(ref mut sk) = shake {
-                (raw ^ sk.next_u16()) as usize
-            } else {
-                raw as usize
-            }
-        };
-
-        // total_len = encrypted_len + pad_len
-        // encrypted_len includes 16-byte GCM tag
-        // EOF: total_len == overhead (16) + pad_len  →  plaintext empty
-        let encrypted_len = total_len.saturating_sub(pad_len);
-
-        if encrypted_len == 0 {
-            break;
-        }
-
-        // Step 3: read & decrypt
-        let plain = match sec {
-            SEC_NONE => {
-                let mut buf = vec![0u8; encrypted_len];
-                r.read_exact(&mut buf).await?;
-                buf
-            }
-            SEC_AES128_GCM | SEC_AUTO => {
-                if encrypted_len < 16 {
-                    bail!("chunk too small: {encrypted_len}");
-                }
-                let mut ct = vec![0u8; encrypted_len];
-                r.read_exact(&mut ct).await?;
-                let nonce = chunk_nonce(&iv, count);
-                let cipher = Aes128Gcm::new_from_slice(&key)?;
-                cipher
-                    .decrypt(Nonce::from_slice(&nonce), ct.as_slice())
-                    .map_err(|_| anyhow!("aes-gcm decrypt at {count}"))?
-            }
-            SEC_CHACHA20 => {
-                use chacha20poly1305::ChaCha20Poly1305;
-                if encrypted_len < 16 {
-                    bail!("chunk too small");
-                }
-                let mut ct = vec![0u8; encrypted_len];
-                r.read_exact(&mut ct).await?;
-                let nonce = chunk_nonce(&iv, count);
-                let ck = chacha_key(&key);
-                let cipher = ChaCha20Poly1305::new_from_slice(&ck)?;
-                cipher
-                    .decrypt(chacha20poly1305::Nonce::from_slice(&nonce), ct.as_slice())
-                    .map_err(|_| anyhow!("chacha decrypt"))?
-            }
-            _ => bail!("unsupported security {sec}"),
-        };
-        count = count.wrapping_add(1);
-
-        // Step 4: skip padding bytes
-        if pad_len > 0 {
-            let mut skip = vec![0u8; pad_len];
-            r.read_exact(&mut skip).await?;
-        }
-
-        if plain.is_empty() {
-            break;
-        }
+    let mut codec = ChunkCodec::new(key, iv, opt, sec);
+    while let Some(plain) = codec.read_chunk(r).await? {
         w.write_all(&plain).await?;
     }
     Ok(())
@@ -411,95 +458,206 @@ where
         tokio::io::copy(r, w).await?;
         return Ok(());
     }
-    tracing::debug!(
-        "[vmess] relay_down sec={sec:#x} opt={opt:#x} masking={} padding={} auth_len={}",
-        opt & OPT_CHUNK_MASKING != 0,
-        opt & OPT_GLOBAL_PADDING != 0,
-        opt & OPT_AUTH_LEN != 0
-    );
-
-    let use_masking = opt & OPT_CHUNK_MASKING != 0;
-    let use_padding = opt & OPT_GLOBAL_PADDING != 0;
-    let use_auth_len = opt & OPT_AUTH_LEN != 0;
-    let auth_len_key = use_auth_len.then(|| kdf16(&key, &[b"auth_len"]));
-
-    let mut shake = use_masking.then(|| Shake128Reader::new(&iv));
-    let mut count: u16 = 0;
+    let mut codec = ChunkCodec::new(key, iv, opt, sec);
     let mut buf = vec![0u8; CHUNK_SIZE];
-
     loop {
         let n = r.read(&mut buf).await?;
         let is_eof = n == 0;
-        let plain = if is_eof { &[][..] } else { &buf[..n] };
+        codec.write_chunk(w, &buf[..n]).await?;
+        if is_eof {
+            break;
+        }
+    }
+    Ok(())
+}
 
-        tracing::debug!("[vmess] relay_down chunk count={count} n={n} is_eof={is_eof}");
+// ── Chunk codec：分块加解密共享逻辑 ───────────────────────────────────────────
+//
+// 把原本散落在 `relay_up`/`relay_down` 里的 Shake128 / padding / auth_len /
+// AEAD 调用收敛到一个结构体，TCP 和 UDP 路径共用，避免逻辑漂移。
 
-        // Step 1: get padding size FIRST (same Shake128 order as decode side)
-        // Xray: NextPaddingLen() is called before Encode/Decode on the same Shake instance
-        let pad_len: usize = if use_padding {
-            shake
+struct ChunkCodec {
+    key: [u8; 16],
+    iv: [u8; 16],
+    sec: u8,
+    use_padding: bool,
+    use_auth_len: bool,
+    auth_len_key: Option<[u8; 16]>,
+    shake: Option<Shake128Reader>,
+    count: u16,
+}
+
+impl ChunkCodec {
+    fn new(key: [u8; 16], iv: [u8; 16], opt: u8, sec: u8) -> Self {
+        let use_masking = opt & OPT_CHUNK_MASKING != 0;
+        let use_padding = opt & OPT_GLOBAL_PADDING != 0;
+        let use_auth_len = opt & OPT_AUTH_LEN != 0;
+        let auth_len_key = use_auth_len.then(|| kdf16(&key, &[b"auth_len"]));
+        let shake = use_masking.then(|| Shake128Reader::new(&iv));
+        Self {
+            key,
+            iv,
+            sec,
+            use_padding,
+            use_auth_len,
+            auth_len_key,
+            shake,
+            count: 0,
+        }
+    }
+
+    /// 读一个 chunk，返回明文。EOF chunk（明文为空）返回 `None`。
+    async fn read_chunk<R: AsyncRead + Unpin>(&mut self, r: &mut R) -> Result<Option<Vec<u8>>> {
+        // Step 1: padding length (Xray: NextPaddingLen BEFORE Decode)
+        let pad_len: usize = if self.use_padding {
+            self.shake
                 .as_mut()
-                .map(|s| {
-                    let p = (s.next_u16() % 64) as usize;
-                    tracing::debug!("[vmess] down pad_len={p} count={count}");
-                    p
-                })
+                .map(|s| (s.next_u16() % 64) as usize)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+
+        // Step 2: read & decode size field
+        let total_len: usize = if self.use_auth_len {
+            let mut buf = [0u8; 18]; // 2 data + 16 tag
+            r.read_exact(&mut buf).await?;
+            let nonce = chunk_nonce(&self.iv, self.count);
+            let lc = Aes128Gcm::new_from_slice(self.auth_len_key.as_ref().unwrap())?;
+            let plain = lc
+                .decrypt(Nonce::from_slice(&nonce), buf.as_ref())
+                .map_err(|_| anyhow!("auth_len decrypt"))?;
+            self.count = self.count.wrapping_add(1);
+            u16::from_be_bytes([plain[0], plain[1]]) as usize
+        } else {
+            let mut buf = [0u8; 2];
+            r.read_exact(&mut buf).await?;
+            let raw = u16::from_be_bytes(buf);
+            if let Some(ref mut sk) = self.shake {
+                (raw ^ sk.next_u16()) as usize
+            } else {
+                raw as usize
+            }
+        };
+
+        // total_len = encrypted_len + pad_len; encrypted_len includes 16B GCM tag
+        // EOF: total_len == pad_len → plaintext empty
+        let encrypted_len = total_len.saturating_sub(pad_len);
+        if encrypted_len == 0 {
+            // 仍需消耗 padding 字节，保持流位置同步
+            if pad_len > 0 {
+                let mut skip = vec![0u8; pad_len];
+                r.read_exact(&mut skip).await?;
+            }
+            return Ok(None);
+        }
+
+        // Step 3: read & decrypt
+        let plain = match self.sec {
+            SEC_NONE => {
+                let mut buf = vec![0u8; encrypted_len];
+                r.read_exact(&mut buf).await?;
+                buf
+            }
+            SEC_AES128_GCM | SEC_AUTO => {
+                if encrypted_len < 16 {
+                    bail!("chunk too small: {encrypted_len}");
+                }
+                let mut ct = vec![0u8; encrypted_len];
+                r.read_exact(&mut ct).await?;
+                let nonce = chunk_nonce(&self.iv, self.count);
+                let cipher = Aes128Gcm::new_from_slice(&self.key)?;
+                cipher
+                    .decrypt(Nonce::from_slice(&nonce), ct.as_slice())
+                    .map_err(|_| anyhow!("aes-gcm decrypt at {}", self.count))?
+            }
+            SEC_CHACHA20 => {
+                use chacha20poly1305::ChaCha20Poly1305;
+                if encrypted_len < 16 {
+                    bail!("chunk too small");
+                }
+                let mut ct = vec![0u8; encrypted_len];
+                r.read_exact(&mut ct).await?;
+                let nonce = chunk_nonce(&self.iv, self.count);
+                let ck = chacha_key(&self.key);
+                let cipher = ChaCha20Poly1305::new_from_slice(&ck)?;
+                cipher
+                    .decrypt(chacha20poly1305::Nonce::from_slice(&nonce), ct.as_slice())
+                    .map_err(|_| anyhow!("chacha decrypt"))?
+            }
+            _ => bail!("unsupported security {}", self.sec),
+        };
+        self.count = self.count.wrapping_add(1);
+
+        // Step 4: skip padding bytes
+        if pad_len > 0 {
+            let mut skip = vec![0u8; pad_len];
+            r.read_exact(&mut skip).await?;
+        }
+
+        if plain.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(plain))
+        }
+    }
+
+    /// 写一个 chunk。`plain` 为空时写 EOF chunk（仅 TCP downlink 在对端 EOF 时用）。
+    async fn write_chunk<W: AsyncWrite + Unpin>(&mut self, w: &mut W, plain: &[u8]) -> Result<()> {
+        // Step 1: padding size FIRST（Shake128 顺序与 decode 一致）
+        let pad_len: usize = if self.use_padding {
+            self.shake
+                .as_mut()
+                .map(|s| (s.next_u16() % 64) as usize)
                 .unwrap_or(0)
         } else {
             0
         };
 
         // Step 2: encrypt
-        let ct: Vec<u8> = match sec {
+        let ct: Vec<u8> = match self.sec {
             SEC_NONE => plain.to_vec(),
             SEC_AES128_GCM | SEC_AUTO => {
-                let nonce = chunk_nonce(&iv, count);
-                let cipher = Aes128Gcm::new_from_slice(&key)?;
+                let nonce = chunk_nonce(&self.iv, self.count);
+                let cipher = Aes128Gcm::new_from_slice(&self.key)?;
                 cipher
                     .encrypt(Nonce::from_slice(&nonce), plain)
                     .map_err(|_| anyhow!("aes-gcm encrypt"))?
             }
             SEC_CHACHA20 => {
                 use chacha20poly1305::ChaCha20Poly1305;
-                let nonce = chunk_nonce(&iv, count);
-                let ck = chacha_key(&key);
+                let nonce = chunk_nonce(&self.iv, self.count);
+                let ck = chacha_key(&self.key);
                 let cipher = ChaCha20Poly1305::new_from_slice(&ck)?;
                 cipher
                     .encrypt(chacha20poly1305::Nonce::from_slice(&nonce), plain)
                     .map_err(|_| anyhow!("chacha encrypt"))?
             }
-            _ => bail!("unsupported security {sec}"),
+            _ => bail!("unsupported security {}", self.sec),
         };
-        count = count.wrapping_add(1);
+        self.count = self.count.wrapping_add(1);
 
-        // Step 3: write size field = encrypted_len + pad_len (masked or plain)
+        // Step 3: size field = encrypted_len + pad_len (masked or plain)
         let total_size = (ct.len() + pad_len) as u16;
-        tracing::trace!(
-            "[vmess] down chunk={} ct_len={} pad_len={} total_size={}",
-            count - 1,
-            ct.len(),
-            pad_len,
-            total_size
-        );
-        if use_auth_len {
-            let nonce = chunk_nonce(&iv, count);
-            count = count.wrapping_add(1);
-            let lc = Aes128Gcm::new_from_slice(&auth_len_key.unwrap())?;
+        if self.use_auth_len {
+            let nonce = chunk_nonce(&self.iv, self.count);
+            self.count = self.count.wrapping_add(1);
+            let lc = Aes128Gcm::new_from_slice(self.auth_len_key.as_ref().unwrap())?;
             let enc_len = lc
                 .encrypt(Nonce::from_slice(&nonce), total_size.to_be_bytes().as_ref())
                 .map_err(|_| anyhow!("len encrypt"))?;
             w.write_all(&enc_len).await?;
-        } else if let Some(ref mut sk) = shake {
+        } else if let Some(ref mut sk) = self.shake {
             w.write_all(&(total_size ^ sk.next_u16()).to_be_bytes())
                 .await?;
         } else {
             w.write_all(&total_size.to_be_bytes()).await?;
         }
 
-        // Step 4: write ciphertext
+        // Step 4: ciphertext
         w.write_all(&ct).await?;
 
-        // Step 5: write random padding
+        // Step 5: random padding
         if pad_len > 0 {
             let mut pad = vec![0u8; pad_len];
             rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut pad);
@@ -507,12 +665,8 @@ where
         }
 
         w.flush().await?;
-
-        if is_eof {
-            break;
-        }
+        Ok(())
     }
-    Ok(())
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -562,6 +716,8 @@ impl Shake128Reader {
 
 struct VmessRequest {
     target: String,
+    /// 1 = TCP, 2 = UDP（与 Xray VMess 一致）
+    cmd: u8,
     request_body_key: [u8; 16],
     request_body_iv: [u8; 16],
     response_body_key: [u8; 16],
@@ -620,8 +776,8 @@ fn parse_plain_header(h: &[u8]) -> Result<VmessRequest> {
     let pad_len = (h[35] >> 4) as usize;
     let security = h[35] & 0x0f;
     let cmd = h[37];
-    if cmd != 0x01 {
-        bail!("UDP not supported (cmd={cmd:#x})");
+    if cmd != CMD_TCP && cmd != CMD_UDP {
+        bail!("vmess: unsupported cmd {cmd:#x}");
     }
 
     let port = u16::from_be_bytes([h[38], h[39]]);
@@ -660,6 +816,7 @@ fn parse_plain_header(h: &[u8]) -> Result<VmessRequest> {
 
     Ok(VmessRequest {
         target: format!("{host}:{port}"),
+        cmd,
         request_body_key: req_key,
         request_body_iv: req_iv,
         response_body_key,
