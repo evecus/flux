@@ -183,8 +183,12 @@ async fn get_or_create_session(inner: &Arc<ServerInner>, session_id: &str) -> Ar
         return Arc::clone(s);
     }
 
-    let (up_tx, up_rx) = mpsc::channel::<UploadPacket>(64);
-    let (down_tx, down_rx) = mpsc::channel::<bytes::Bytes>(64);
+    // channel 容量：packet-up 模式下客户端每个 chunk 发一个 POST，
+    // 高并发（如视频流）时会快速产生大量 Packet。容量太小会导致
+    // up_tx.send() 阻塞，hyper 连接被占用，影响吞吐。
+    // 512 足够缓冲突发流量，又不至于占用过多内存。
+    let (up_tx, up_rx) = mpsc::channel::<UploadPacket>(512);
+    let (down_tx, down_rx) = mpsc::channel::<bytes::Bytes>(512);
     let get_arrived = Arc::new(Notify::new());
 
     let session = Arc::new(Mutex::new(Session {
@@ -213,9 +217,10 @@ async fn get_or_create_session(inner: &Arc<ServerInner>, session_id: &str) -> Ar
                 let _ = s.up_tx.send(UploadPacket::Eof).await;
             }
         } else {
-            // GET 已到达，再等 300s 后清理（正常连接早已结束，这只是防内存泄漏的兜底）
-            tokio::time::sleep(Duration::from_secs(300)).await;
-            debug!("[xhttp] session {sid} cleaned up after connection lifetime");
+            // GET 已到达，再等 1 小时后清理（防内存泄漏的兜底）。
+            // 正常连接早已结束；长连接（SSH/WebSocket/长轮询）不会被误杀。
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+            debug!("[xhttp] session {sid} cleaned up after connection lifetime (1h timeout)");
             inner2.sessions.lock().await.remove(&sid);
         }
     });
@@ -404,6 +409,8 @@ async fn handle_post(
                         }
                     }
                 }
+                // body 读完或出错时发送 Eof，让 XhttpStream::poll_read 能感知上行结束
+                let _ = up_tx.send(UploadPacket::Eof).await;
             });
         }
         Some(s) => {
@@ -633,7 +640,13 @@ impl AsyncWrite for XhttpStream {
         Poll::Ready(Ok(()))
     }
 
-    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+    fn poll_shutdown(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        // 关闭下行 channel：drop PollSender 会让 down_rx 收到 None，
+        // 从而结束 GET 响应流（ResponseBody::Stream 返回 None），
+        // 客户端的下行读取才会收到 EOF。
+        // 不关闭的话，远程目标已断开但 GET 响应流永远不结束，
+        // 客户端的 relay downlink 永远读不到 EOF → 连接挂死。
+        self.down_tx.close();
         Poll::Ready(Ok(()))
     }
 }
