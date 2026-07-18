@@ -21,7 +21,7 @@
 //!   IPv6   → 0x03
 
 use anyhow::{bail, Result};
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tracing::debug;
 
@@ -171,3 +171,100 @@ pub fn parse_uuid(s: &str) -> Result<[u8; 16]> {
     }
     Ok(bytes)
 }
+
+// ── packetaddr (VLESS UDP relay framing) ──────────────────────────────────────
+//
+// 与 Xray `packetaddr/packetaddr.go` 一致：UDP 包通过同一 VLESS 流传输，
+// 每个包前置 2 字节大端长度，载荷为 SOCKS5 风格的 ATYP+ADDR+PORT+payload。
+//
+//   入站/出站每包: [2B length BE] [1B ATYP] [addr] [2B port BE] [payload]
+//   length = len(ATYP + addr + port + payload)
+//
+// 域名目标在 VLESS UDP 中按 Xray 行为处理：仅在解析时支持，实际拨号时
+// 调用方应已用 lookup_host 把域名解析成 SocketAddr。
+
+/// 读取一个 packetaddr 帧，返回 (源/目标地址, payload)。
+///
+/// `reader` 位置应在帧起始（即 2 字节长度前缀处）。
+pub async fn read_packet<'a, R>(
+    reader: &mut R,
+    buf: &'a mut [u8],
+) -> Result<(SocketAddr, &'a [u8])>
+where
+    R: AsyncRead + Unpin,
+{
+    let len = reader.read_u16().await? as usize;
+    if len == 0 {
+        bail!("vless: packetaddr: zero-length frame");
+    }
+    if len > buf.len() {
+        bail!(
+            "vless: packetaddr: frame too large ({len} > {})",
+            buf.len()
+        );
+    }
+    let frame = &mut buf[..len];
+    reader.read_exact(frame).await?;
+
+    // frame = ATYP + addr + port(2) + payload
+    let atyp = frame[0];
+    let (addr_len, ip) = match atyp {
+        ATYP_IPV4 => (4, std::net::IpAddr::V4(Ipv4Addr::from([frame[1], frame[2], frame[3], frame[4]]))),
+        ATYP_IPV6 => {
+            let mut b = [0u8; 16];
+            b.copy_from_slice(&frame[1..17]);
+            (16, std::net::IpAddr::V6(Ipv6Addr::from(b)))
+        }
+        _ => bail!("vless: packetaddr: ATYP {atyp:#x} 不支持（packetaddr 仅承载已解析的 IP 地址）"),
+    };
+    let port_off = 1 + addr_len;
+    if frame.len() < port_off + 2 {
+        bail!("vless: packetaddr: frame truncated before port");
+    }
+    let port = u16::from_be_bytes([frame[port_off], frame[port_off + 1]]);
+    let payload = &frame[port_off + 2..];
+    Ok((SocketAddr::new(ip, port), payload))
+}
+
+/// 写一个 packetaddr 帧。
+///
+/// `writer` 位置应在帧起始处；写完后流位置指向下一帧。
+pub async fn write_packet<W>(
+    writer: &mut W,
+    src: SocketAddr,
+    payload: &[u8],
+) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    // addr 段：IPv4=4B，IPv6=16B；ATYP=1B；port=2B
+    let addr_len = match src {
+        SocketAddr::V4(_) => 4,
+        SocketAddr::V6(_) => 16,
+    };
+    let frame_len = 1 + addr_len + 2 + payload.len();
+    if frame_len > 0xFFFF {
+        bail!("vless: packetaddr: frame too large ({frame_len} > 65535)");
+    }
+
+    let mut hdr = [0u8; 1 + 16 + 2]; // 最大头部空间
+    hdr[0] = match src {
+        SocketAddr::V4(v4) => {
+            hdr[1..5].copy_from_slice(&v4.ip().octets());
+            ATYP_IPV4
+        }
+        SocketAddr::V6(v6) => {
+            hdr[1..17].copy_from_slice(&v6.ip().octets());
+            ATYP_IPV6
+        }
+    };
+    let port_off = 1 + addr_len;
+    hdr[port_off..port_off + 2].copy_from_slice(&src.port().to_be_bytes());
+
+    // 2B length 前缀
+    writer.write_all(&(frame_len as u16).to_be_bytes()).await?;
+    writer.write_all(&hdr[..1 + addr_len + 2]).await?;
+    writer.write_all(payload).await?;
+    Ok(())
+}
+
