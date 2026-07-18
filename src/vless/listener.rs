@@ -1,11 +1,14 @@
-//! VLESS TCP listener — supports TCP, WS, and XHTTP transports with optional TLS/Reality.
+//! VLESS listener — supports TCP, WS, and XHTTP transports with optional TLS/Reality.
+//! TCP 流量走 `process_vless_stream`；UDP 流量（cmd=0x02，packetaddr）
+//! 走 `relay_udp`，在双栈 `UdpSocket` 上转发。
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, info, warn};
 
@@ -14,7 +17,9 @@ use crate::common::tls::standard as shared_tls;
 use crate::common::transport::websocket as shared_ws;
 use crate::common::transport::xhttp::{XhttpConfig, XhttpServer};
 use crate::config::{VlessConfig, VlessTlsConfig};
-use crate::vless::protocol::{decode_request, encode_response, parse_uuid, CMD_TCP};
+use crate::vless::protocol::{
+    decode_request, encode_response, parse_uuid, read_packet, write_packet, CMD_TCP, CMD_UDP,
+};
 use crate::vless::tls::reality as vless_reality;
 
 pub async fn run(cfg: Arc<VlessConfig>) -> Result<()> {
@@ -226,14 +231,30 @@ where
             e
         })?;
 
-    if request.command != CMD_TCP {
-        anyhow::bail!("vless: UDP not supported (cmd={:#x})", request.command);
+    match request.command {
+        CMD_TCP => {
+            info!("[vless] {peer} → {} (tcp)", request.target);
+            relay_tcp(stream, peer, &request.target, bind_ip).await
+        }
+        CMD_UDP => {
+            info!("[vless] {peer} → {} (udp)", request.target);
+            relay_udp(stream, peer, bind_ip).await
+        }
+        other => anyhow::bail!("vless: unsupported command {other:#x}"),
     }
+}
 
-    info!("[vless] {peer} → {}", request.target);
-
+async fn relay_tcp<S>(
+    mut stream: S,
+    peer: SocketAddr,
+    target: &str,
+    bind_ip: OutboundBind,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let outbound = match shared_net::dial_tcp_timeout(
-        &request.target,
+        target,
         bind_ip,
         std::time::Duration::from_secs(10),
     )
@@ -241,18 +262,18 @@ where
     {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
-            warn!("[vless] {peer} connect {} timeout", request.target);
+            warn!("[vless] {peer} connect {target} timeout");
             anyhow::bail!("connect timeout");
         }
         Err(e) => {
-            warn!("[vless] {peer} connect {} failed: {e}", request.target);
+            warn!("[vless] {peer} connect {target} failed: {e}");
             return Err(e.into());
         }
     };
 
     encode_response(&mut stream).await?;
 
-    relay(stream, outbound, peer, &request.target).await
+    relay(stream, outbound, peer, target).await
 }
 
 async fn relay<S>(inbound: S, outbound: TcpStream, peer: SocketAddr, target: &str) -> Result<()>
@@ -283,4 +304,105 @@ where
     tokio::join!(uplink, downlink);
     debug!("[vless] relay closed: {peer} ↔ {target}");
     Ok(())
+}
+
+// ── UDP relay (VLESS cmd=0x02, packetaddr) ────────────────────────────────────
+//
+// 一个 VLESS UDP 流可承载去往多个目标的包（典型场景：DNS over UDP + QUIC + 等）。
+// 出站用一对 socket（v4 / v6）覆盖两个地址族；socket 由 OutboundBind 配置。
+//
+// 包格式（packetaddr，对齐 Xray `packetaddr/packetaddr.go`）：
+//   [2B length BE] [1B ATYP] [addr] [2B port BE] [payload]
+//
+// 上下行用 `tokio::select!` 并发，加 60s idle 超时；任一方向出错或 EOF 即收尾。
+
+const VLESS_UDP_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+const VLESS_UDP_MAX_PACKET: usize = 65535;
+
+async fn relay_udp<S>(stream: S, peer: SocketAddr, bind_ip: OutboundBind) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    // VLESS UDP 响应头与 TCP 相同（version + addon_len）。
+    let mut stream = stream;
+    encode_response(&mut stream).await?;
+
+    let socket_v4 = shared_net::bind_udp(bind_ip, false).await?;
+    let socket_v6 = shared_net::bind_udp(bind_ip, true).await.ok();
+
+    // 拆读/写两半，与 TCP relay 一致；两半各自独立，无需串行化。
+    let (mut in_r, mut in_w) = tokio::io::split(stream);
+
+    // 上行：从 VLESS 流读 packetaddr 帧 → 按 addr 地址族选 socket send_to。
+    let uplink = async {
+        let mut buf = vec![0u8; VLESS_UDP_MAX_PACKET];
+        loop {
+            let (target, payload) = match read_packet(&mut in_r, &mut buf).await {
+                Ok(t) => t,
+                Err(e) => {
+                    debug!("[vless] {peer} udp uplink read end: {e}");
+                    return;
+                }
+            };
+            let sock = match target {
+                SocketAddr::V4(_) => &socket_v4,
+                SocketAddr::V6(_) => match &socket_v6 {
+                    Some(s) => s,
+                    None => {
+                        debug!("[vless] {peer} udp drop v6 target {target} (no v6 socket)");
+                        continue;
+                    }
+                },
+            };
+            if let Err(e) = sock.send_to(payload, target).await {
+                debug!("[vless] {peer} udp send_to {target}: {e}");
+            }
+        }
+    };
+
+    // 下行：从 v4 / v6 socket recv_from → packetaddr 编码 → 写回 VLESS 流。
+    // 每次 recv 在 helper 内自行分配 buf，避免 select! 两分支同时借用同一缓冲。
+    let downlink = async {
+        loop {
+            let (from, payload) = match &socket_v6 {
+                Some(v6) => tokio::select! {
+                    r = recv_one(&socket_v4) => match r { Ok(v) => v, Err(e) => { debug!("[vless] {peer} udp recv v4: {e}"); return; } },
+                    r = recv_one(v6)         => match r { Ok(v) => v, Err(e) => { debug!("[vless] {peer} udp recv v6: {e}"); return; } },
+                },
+                None => match recv_one(&socket_v4).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        debug!("[vless] {peer} udp recv v4: {e}");
+                        return;
+                    }
+                },
+            };
+            if let Err(e) = write_packet(&mut in_w, from, &payload).await {
+                debug!("[vless] {peer} udp write_packet: {e}");
+                return;
+            }
+        }
+    };
+
+    // idle 超时：60s 内任一方向都无活动就关流。
+    let idle = tokio::time::sleep(VLESS_UDP_IDLE_TIMEOUT);
+
+    tokio::select! {
+        _ = uplink => debug!("[vless] {peer} udp uplink closed"),
+        _ = downlink => debug!("[vless] {peer} udp downlink closed"),
+        _ = idle => debug!("[vless] {peer} udp idle timeout"),
+    }
+
+    // 收尾：显式 shutdown 让对端尽快感知。
+    let _ = in_w.shutdown().await;
+    debug!("[vless] {peer} udp relay closed");
+    Ok(())
+}
+
+/// 从 `sock` 收一个 UDP 包，自带 buffer（避免外层 select! 两分支同时借用）。
+async fn recv_one(sock: &UdpSocket) -> std::io::Result<(SocketAddr, Vec<u8>)> {
+    let mut buf = vec![0u8; VLESS_UDP_MAX_PACKET];
+    let (n, from) = sock.recv_from(&mut buf).await?;
+    buf.truncate(n);
+    Ok((from, buf))
 }
