@@ -32,7 +32,7 @@ level = "info"
 #   ...
 #
 # 支持的 type 值：
-#   vless | vmess | trojan | shadowsocks | hysteria2 | tuic | wireguard | anytls | socks
+#   vless | vmess | trojan | shadowsocks | hysteria2 | tuic | wireguard | anytls | socks | shadowquic
 #
 # 出口 IP（多公网 IP 服务器场景，wireguard 节点暂不支持）：
 #   outbound_bind_ipv4 = "203.0.113.10"   # 可选，出站时绑定到本机的这个 IPv4 地址
@@ -412,6 +412,69 @@ level = "info"
 # tag    = "socks-multi"
 # type   = "socks"
 # listen = "0.0.0.0:1081"
+#
+# [[node.users]]
+# username = "alice"
+# password = "s3cr3t"
+#
+# [[node.users]]
+# username = "bob"
+# password = "another-password"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 10. ShadowQuic   (0-RTT QUIC + JLS SNI 伪装，主动探测防御)
+# ══════════════════════════════════════════════════════════════════════════════
+# 客户端推荐：shadowquic 官方客户端 / sing-box（需 shadowquic outbound 支持）
+#
+# 关键概念：
+#   jls_upstream — JLS 伪装上游（host:port），必须是真实可访问的 HTTPS 站点
+#                  （如 "www.bing.com:443"）。未认证流量会被透明转发到此目标，
+#                  让主动探测者看到的是一个正常的 HTTPS 站点。
+#   server_name  — TLS SNI。留空则自动从 jls_upstream 的 host 部分推断。
+#                  必须与客户端配置一致。
+#   users        — JLS 用户列表，username/password 必须与客户端一致。
+#
+# 客户端示例（shadowquic outbound）：
+#   server: your.server.com
+#   server_port: 443
+#   username: alice
+#   password: s3cr3t
+#   sni: www.bing.com
+#   masquerade: www.bing.com:443
+#
+# ── 10-A: ShadowQuic 基础配置 ───────────────────────────────────────────────
+# [[node]]
+# tag         = "sq-main"
+# type        = "shadowquic"
+# listen      = "0.0.0.0:443"
+# jls_upstream = "www.bing.com:443"
+#
+# [node.users]
+# username = "alice"
+# password = "s3cr3t"
+#
+# # 可选高级参数（以下均为默认值）：
+# # server_name       = "www.bing.com"   # 留空则取 jls_upstream 的 host
+# # alpn              = ["h3"]
+# # zero_rtt          = true
+# # congestion_control = "bbr"           # 也支持 "cubic" | "new-reno" | "brutal"
+# # initial_mtu       = 1300
+# # min_mtu           = 1290
+# # gso               = true
+# # mtu_discovery     = true
+# # blackhole_detection = false
+# # udp_relay_ipv6    = false            # 启用后中继 IPv6 UDP（需本机有 IPv6 出口）
+# # udp_timeout       = "30s"
+# # outbound_bind_ipv4 = "203.0.113.10"  # 多公网 IP 场景，绑定出站源 IP
+# # outbound_bind_ipv6 = "2001:db8::1"
+
+# ── 10-B: ShadowQuic 多用户 ─────────────────────────────────────────────────
+# [[node]]
+# tag          = "sq-multi"
+# type         = "shadowquic"
+# listen       = "0.0.0.0:8443"
+# jls_upstream = "www.cloudflare.com:443"
 #
 # [[node.users]]
 # username = "alice"
