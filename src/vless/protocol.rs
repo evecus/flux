@@ -22,8 +22,12 @@
 
 use anyhow::{bail, Result};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::UdpSocket;
 use tracing::debug;
+
+use crate::common::net::{self as shared_net, OutboundBind};
 
 // ── Constants (Xray protocol values) ─────────────────────────────────────────
 
@@ -266,5 +270,175 @@ where
     writer.write_all(&hdr[..1 + addr_len + 2]).await?;
     writer.write_all(payload).await?;
     Ok(())
+}
+
+// ── packetaddr 切片版（VMess 等分块协议用） ──────────────────────────────────
+//
+// VMess 的 AEAD 分块解密后，单个 chunk 的明文 = 一个完整 packetaddr 帧
+// （含 2B length 前缀）。下面两个函数处理"已经拿到完整帧字节"的场景，
+// 与上面基于流的 `read_packet`/`write_packet` 互补。
+
+/// 从一个完整的 packetaddr 帧字节切片解析出 (地址, payload)。
+///
+/// `frame` 必须包含 2B length 前缀 + ATYP + addr + port + payload，
+/// 且 `frame.len()` 必须等于 length + 2。
+pub fn parse_packet_frame(frame: &[u8]) -> Result<(SocketAddr, &[u8])> {
+    if frame.len() < 4 {
+        bail!("vless: packetaddr: frame too short ({})", frame.len());
+    }
+    let len = u16::from_be_bytes([frame[0], frame[1]]) as usize;
+    if frame.len() != len + 2 {
+        bail!(
+            "vless: packetaddr: frame length mismatch (header says {len}, got {})",
+            frame.len() - 2
+        );
+    }
+    let body = &frame[2..2 + len];
+    // body = ATYP + addr + port(2) + payload
+    let atyp = body[0];
+    let (addr_len, ip) = match atyp {
+        ATYP_IPV4 => (
+            4,
+            std::net::IpAddr::V4(Ipv4Addr::from([
+                body[1], body[2], body[3], body[4],
+            ])),
+        ),
+        ATYP_IPV6 => {
+            let mut b = [0u8; 16];
+            b.copy_from_slice(&body[1..17]);
+            (16, std::net::IpAddr::V6(Ipv6Addr::from(b)))
+        }
+        _ => bail!(
+            "vless: packetaddr: ATYP {atyp:#x} 不支持（packetaddr 仅承载已解析的 IP 地址）"
+        ),
+    };
+    let port_off = 1 + addr_len;
+    if body.len() < port_off + 2 {
+        bail!("vless: packetaddr: frame truncated before port");
+    }
+    let port = u16::from_be_bytes([body[port_off], body[port_off + 1]]);
+    let payload = &body[port_off + 2..];
+    Ok((SocketAddr::new(ip, port), payload))
+}
+
+/// 编码一个完整的 packetaddr 帧（含 2B length 前缀），返回新分配的字节向量。
+pub fn encode_packet_frame(src: SocketAddr, payload: &[u8]) -> Result<Vec<u8>> {
+    let addr_len = match src {
+        SocketAddr::V4(_) => 4,
+        SocketAddr::V6(_) => 16,
+    };
+    let frame_len = 1 + addr_len + 2 + payload.len();
+    if frame_len > 0xFFFF {
+        bail!("vless: packetaddr: frame too large ({frame_len} > 65535)");
+    }
+    let mut out = Vec::with_capacity(2 + frame_len);
+    out.extend_from_slice(&(frame_len as u16).to_be_bytes());
+    match src {
+        SocketAddr::V4(v4) => {
+            out.push(ATYP_IPV4);
+            out.extend_from_slice(&v4.ip().octets());
+        }
+        SocketAddr::V6(v6) => {
+            out.push(ATYP_IPV6);
+            out.extend_from_slice(&v6.ip().octets());
+        }
+    }
+    out.extend_from_slice(&src.port().to_be_bytes());
+    out.extend_from_slice(payload);
+    Ok(out)
+}
+
+// ── 共享 packetaddr UDP relay ─────────────────────────────────────────────────
+//
+// VLESS / Trojan / VMess(sec=none, no chunk) 共用：直接从流读写 packetaddr 帧。
+// 调用方负责在调用前写完各自的协议响应头（VLESS 需 `encode_response`，
+// Trojan / VMess 无需额外响应头）。
+
+const PACKETADDR_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+const PACKETADDR_MAX_PACKET: usize = 65535;
+
+pub async fn packetaddr_relay<S>(
+    stream: S,
+    peer: SocketAddr,
+    bind_ip: OutboundBind,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let socket_v4 = shared_net::bind_udp(bind_ip, false).await?;
+    let socket_v6 = shared_net::bind_udp(bind_ip, true).await.ok();
+
+    // 拆读/写两半，与 TCP relay 一致；两半各自独立，无需串行化。
+    let (mut in_r, mut in_w) = tokio::io::split(stream);
+
+    // 上行：从流读 packetaddr 帧 → 按 addr 地址族选 socket send_to。
+    let uplink = async {
+        let mut buf = vec![0u8; PACKETADDR_MAX_PACKET];
+        loop {
+            let (target, payload) = match read_packet(&mut in_r, &mut buf).await {
+                Ok(t) => t,
+                Err(e) => {
+                    debug!("[packetaddr] {peer} udp uplink read end: {e}");
+                    return;
+                }
+            };
+            let sock = match target {
+                SocketAddr::V4(_) => &socket_v4,
+                SocketAddr::V6(_) => match &socket_v6 {
+                    Some(s) => s,
+                    None => {
+                        debug!("[packetaddr] {peer} udp drop v6 target {target} (no v6 socket)");
+                        continue;
+                    }
+                },
+            };
+            if let Err(e) = sock.send_to(payload, target).await {
+                debug!("[packetaddr] {peer} udp send_to {target}: {e}");
+            }
+        }
+    };
+
+    // 下行：从 v4 / v6 socket recv_from → packetaddr 编码 → 写回流。
+    let downlink = async {
+        loop {
+            let (from, payload) = match &socket_v6 {
+                Some(v6) => tokio::select! {
+                    r = recv_one(&socket_v4) => match r { Ok(v) => v, Err(e) => { debug!("[packetaddr] {peer} udp recv v4: {e}"); return; } },
+                    r = recv_one(v6)         => match r { Ok(v) => v, Err(e) => { debug!("[packetaddr] {peer} udp recv v6: {e}"); return; } },
+                },
+                None => match recv_one(&socket_v4).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        debug!("[packetaddr] {peer} udp recv v4: {e}");
+                        return;
+                    }
+                },
+            };
+            if let Err(e) = write_packet(&mut in_w, from, &payload).await {
+                debug!("[packetaddr] {peer} udp write_packet: {e}");
+                return;
+            }
+        }
+    };
+
+    let idle = tokio::time::sleep(PACKETADDR_IDLE_TIMEOUT);
+
+    tokio::select! {
+        _ = uplink => debug!("[packetaddr] {peer} udp uplink closed"),
+        _ = downlink => debug!("[packetaddr] {peer} udp downlink closed"),
+        _ = idle => debug!("[packetaddr] {peer} udp idle timeout"),
+    }
+
+    let _ = in_w.shutdown().await;
+    debug!("[packetaddr] {peer} udp relay closed");
+    Ok(())
+}
+
+/// 从 `sock` 收一个 UDP 包，自带 buffer（避免外层 select! 两分支同时借用）。
+async fn recv_one(sock: &UdpSocket) -> std::io::Result<(SocketAddr, Vec<u8>)> {
+    let mut buf = vec![0u8; PACKETADDR_MAX_PACKET];
+    let (n, from) = sock.recv_from(&mut buf).await?;
+    buf.truncate(n);
+    Ok((from, buf))
 }
 
