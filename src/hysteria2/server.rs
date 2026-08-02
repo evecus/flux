@@ -155,6 +155,16 @@ async fn handle_connection(incoming: quinn::Incoming, cfg: Arc<Hysteria2Config>)
                         .unwrap_or("")
                         .to_string();
 
+                    // 对齐 sing-quic protocol.AuthRequestFromHeader：读取客户端
+                    // Hysteria-CC-Rx（客户端接收带宽）和 Hysteria-Padding。
+                    // client_rx = 0 表示客户端未指定，服务端使用自身配置速率。
+                    let client_rx: u64 = req
+                        .headers()
+                        .get("Hysteria-CC-RX")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0);
+
                     let ok = match &cfg.auth {
                         AuthConfig::Password { password } => auth_val == *password,
                         AuthConfig::None => true,
@@ -170,8 +180,22 @@ async fn handle_connection(incoming: quinn::Incoming, cfg: Arc<Hysteria2Config>)
                             .map(|bps| format!("{}", bps))
                             .unwrap_or_else(|| "0".to_string());
 
+                        // 对齐 sing-quic：当客户端声明了接收带宽（client_rx > 0）且
+                        // 低于服务端上行速率时，日志记录实际协商速率。
+                        // 注意：quinn 在连接建立时即创建拥塞控制器（早于 auth），无法像
+                        // sing-box 那样在 auth 后动态切换。此处仅记录协商信息。
+                        let server_up = cfg.bandwidth.up_bps().unwrap_or(0);
+                        let negotiated = if client_rx > 0 && client_rx < server_up {
+                            client_rx
+                        } else {
+                            server_up
+                        };
+                        info!(
+                            "[hy2] Auth OK: {peer} (client_rx={}, server_up={}, negotiated={})",
+                            client_rx, server_up, negotiated
+                        );
+
                         send_auth_ok(stream, &cc_rx).await?;
-                        info!("[hy2] Auth OK: {peer}");
                         break; // 进入阶段二
                     } else {
                         warn!("[hy2] Auth failed from {peer}");
