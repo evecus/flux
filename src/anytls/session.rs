@@ -41,6 +41,7 @@ const CMD_HEART_RESPONSE: u8 = 9;
 const CMD_SERVER_SETTINGS: u8 = 10;
 
 const HEADER_SIZE: usize = 7; // CMD(1) + SID(4) + LEN(2)
+const MAX_FRAME_DATA: usize = 0xFFFF; // 65535，单帧 payload 上限
 
 // ── StreamConn ────────────────────────────────────────────────────────────────
 
@@ -92,12 +93,19 @@ impl StreamConn {
         Ok(())
     }
 
-    /// Write data as a PSH frame.
+    /// Write data as PSH frame(s). Data > 65535 bytes is split into
+    /// multiple PSH frames per the AnyTLS protocol spec (sing-anytls
+    /// `writeDataFrame` behavior).
     pub async fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
-        self.write_tx
-            .send((CMD_PSH, self.stream_id, data.to_vec()))
-            .await
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "session closed"))?;
+        // 对齐 sing-anytls: len > maxFrameDataLen 时拆分为多个 cmdPSH 帧
+        for chunk in data.chunks(MAX_FRAME_DATA) {
+            self.write_tx
+                .send((CMD_PSH, self.stream_id, chunk.to_vec()))
+                .await
+                .map_err(|_| {
+                    std::io::Error::new(std::io::ErrorKind::BrokenPipe, "session closed")
+                })?;
+        }
         Ok(data.len())
     }
 
@@ -105,6 +113,24 @@ impl StreamConn {
     pub async fn close(&mut self) -> std::io::Result<()> {
         let _ = self.write_tx.send((CMD_FIN, self.stream_id, vec![])).await;
         Ok(())
+    }
+
+    /// Send SYNACK to confirm stream acceptance (v2 protocol).
+    /// Called after upstream TCP connect succeeds.
+    pub async fn handshake_success(&self) {
+        let _ = self
+            .write_tx
+            .send((CMD_SYNACK, self.stream_id, vec![]))
+            .await;
+    }
+
+    /// Send SYNACK with error to notify stream rejection (v2 protocol).
+    /// Called after upstream TCP connect fails.
+    pub async fn handshake_failure(&self, err: &str) {
+        let _ = self
+            .write_tx
+            .send((CMD_SYNACK, self.stream_id, err.as_bytes().to_vec()))
+            .await;
     }
 }
 
@@ -228,11 +254,8 @@ where
                     buf: BytesMut::new(),
                 };
 
-                // SYNACK for v2+ clients: confirms outbound connection
-                // (we send it immediately; a full impl would send after TCP connect)
-                if peer_version >= 2 {
-                    let _ = write_tx.send((CMD_SYNACK, sid, vec![])).await;
-                }
+                // SYNACK 由 handle_stream 在拨号成功/失败后发送（对齐 sing-anytls）。
+                // v2 客户端会等待 3 秒 SYNACK 超时，所以拨号必须在此窗口内完成。
 
                 tokio::spawn(on_stream(stream_conn));
             }
