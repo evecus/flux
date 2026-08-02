@@ -156,6 +156,10 @@ level = "info"
 # type    = "ws"
 # ws_path = "/vless"
 # ws_host = "your.domain.com"   # 可选：严格校验 Host 头
+# # 0-RTT 早期数据（对齐 sing-box V2RayWebsocketOptions）：
+# ws_max_early_data = 2048                       # 0=禁用（默认）；>0 启用早期数据
+# ws_early_data_header_name = "Sec-WebSocket-Protocol"  # None=路径模式(base64url 追加到 path)；Some=Xray 头模式
+# ws_headers = { "User-Agent" = "Mozilla/5.0" }  # 可选：自定义 HTTP 头校验
 #
 # [node.tls]
 # type      = "tls"
