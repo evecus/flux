@@ -67,14 +67,24 @@ impl Default for XhttpConfig {
 }
 
 impl XhttpConfig {
+    /// 对齐 Xray `Config.GetNormalizedPath`（`splithttp/config.go`）：
+    ///   - 空或非 `/` 开头 → 前补 `/`
+    ///   - 末尾保证有 `/`（便于 `parse_path` 切 sessionId/seq）
+    /// 修复：原实现对 `/` 会产出 `//`（`trim_end_matches('/')` 把 `/` 削成空串，
+    /// 再 format 出 `//`），导致默认配置下所有请求都被 404。
     pub fn normalized_path(&self) -> String {
-        let p = self.path.trim_end_matches('/');
-        let p = if p.starts_with('/') {
-            p.to_string()
-        } else {
-            format!("/{p}")
-        };
-        format!("{p}/")
+        let mut p = self.path.trim_end_matches('/').to_string();
+        if !p.starts_with('/') {
+            p.insert(0, '/');
+        }
+        if p.is_empty() {
+            // path 全部由 `/` 组成（如 `/`、`//`），trim 后为空，规范化为 `/`
+            p.push('/');
+        }
+        if !p.ends_with('/') {
+            p.push('/');
+        }
+        p
     }
 }
 
@@ -93,8 +103,12 @@ struct Session {
     up_tx: mpsc::Sender<UploadPacket>,
     /// GET handler 到达时取走，构造 XhttpStream 的读端
     up_rx: Option<mpsc::Receiver<UploadPacket>>,
-    /// XhttpStream 写端写下行数据
-    down_tx: mpsc::Sender<bytes::Bytes>,
+    /// XhttpStream 写端写下行数据。
+    /// GET handler 到达时取走（`take`，不再 clone）：这是修复下行流挂死的关键 ——
+    /// 只有当所有 `down_tx` 都被释放后，`down_rx` 才会返回 `None`，GET 响应才会结束。
+    /// 之前是 `clone`，导致 session 里永远保留一个 sender，`down_rx` 永远不返回 `None`，
+    /// 下行连接会挂死到 1 小时 TTL 才被清理。
+    down_tx: Option<mpsc::Sender<bytes::Bytes>>,
     /// GET handler 到达时取走，作为 response body
     down_rx: Option<mpsc::Receiver<bytes::Bytes>>,
     /// GET 到达通知（供 TTL 任务监听）
@@ -194,13 +208,16 @@ async fn get_or_create_session(inner: &Arc<ServerInner>, session_id: &str) -> Ar
     let session = Arc::new(Mutex::new(Session {
         up_tx,
         up_rx: Some(up_rx),
-        down_tx,
+        down_tx: Some(down_tx),
         down_rx: Some(down_rx),
         get_arrived: Arc::clone(&get_arrived),
     }));
     map.insert(session_id.to_string(), Arc::clone(&session));
 
-    // TTL：30s 内 GET 未到则清理；GET 到达后再等 300s（连接存活期）再清理
+    // TTL：30s 内 GET 未到则清理。
+    // 注意：GET 到达后不再在这里清理 —— GET 响应流结束时由
+    // `ResponseBody::Stream` 的 cleanup 回调负责移除 session（对齐 Xray
+    // hub.go 的 `defer h.sessions.Delete(sessionId)`）。
     let inner2 = Arc::clone(inner);
     let sid = session_id.to_string();
     tokio::spawn(async move {
@@ -211,18 +228,12 @@ async fn get_or_create_session(inner: &Arc<ServerInner>, session_id: &str) -> Ar
         if get_timed_out {
             // GET 30s 内未到，直接清理
             debug!("[xhttp] session {sid} TTL expired (no GET)");
-            let mut map = inner2.sessions.lock().await;
-            if let Some(s) = map.remove(&sid) {
+            if let Some(s) = inner2.sessions.lock().await.remove(&sid) {
                 let s = s.lock().await;
                 let _ = s.up_tx.send(UploadPacket::Eof).await;
             }
-        } else {
-            // GET 已到达，再等 1 小时后清理（防内存泄漏的兜底）。
-            // 正常连接早已结束；长连接（SSH/WebSocket/长轮询）不会被误杀。
-            tokio::time::sleep(Duration::from_secs(3600)).await;
-            debug!("[xhttp] session {sid} cleaned up after connection lifetime (1h timeout)");
-            inner2.sessions.lock().await.remove(&sid);
         }
+        // GET 已到达的情况不在这里处理 —— 由 ResponseBody 的 cleanup 回调负责。
     });
 
     session
@@ -252,25 +263,47 @@ fn parse_path(req_path: &str, base_path: &str) -> Option<(Option<String>, Option
 
 // ── HTTP 请求处理 ──────────────────────────────────────────────────────────────
 
+/// 对齐 Xray `internet.IsValidHTTPHost`（`transport/internet/internet.go`）：
+///   - 大小写不敏感
+///   - 若 request host 含 `:`（即带端口），仅比较 host 部分
+fn is_valid_http_host(request: &str, config: &str) -> bool {
+    let r = request.to_lowercase();
+    let c = config.to_lowercase();
+    if let Some((h, _)) = r.rsplit_once(':') {
+        // 注意：IPv6 字面量形如 `[::1]:443`，rsplit_once(':') 取到最后一个 `:`
+        // 对 `[::1]:443` → ("[::1]", "443")，h="[::1]" 与配置 `[::1]` 比较仍正确。
+        h == c
+    } else {
+        r == c
+    }
+}
+
 async fn handle_request(
     req: Request<hyper::body::Incoming>,
     inner: &Arc<ServerInner>,
     peer: SocketAddr,
 ) -> Response<ResponseBody> {
+    // 提前取 Origin，用于按 Xray `WriteResponseHeader` 的逻辑回写 CORS。
+    let origin = req
+        .headers()
+        .get("origin")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
     if let Some(expected) = &inner.cfg.host {
         let req_host = req
             .headers()
             .get("host")
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
-        if req_host != expected.as_str() {
+        if !is_valid_http_host(req_host, expected) {
             warn!("[xhttp] {peer} bad host: {req_host} != {expected}");
-            return plain(StatusCode::NOT_FOUND);
+            return plain_with_cors(StatusCode::NOT_FOUND, origin.as_deref());
         }
     }
 
     if *req.method() == Method::OPTIONS {
-        return cors_ok();
+        return cors_ok(origin.as_deref());
     }
 
     let base_path = inner.cfg.normalized_path();
@@ -280,7 +313,7 @@ async fn handle_request(
         Some(p) => p,
         None => {
             warn!("[xhttp] {peer} bad path: {req_path} (base={base_path})");
-            return plain(StatusCode::NOT_FOUND);
+            return plain_with_cors(StatusCode::NOT_FOUND, origin.as_deref());
         }
     };
 
@@ -291,9 +324,9 @@ async fn handle_request(
 
     let is_downlink = *req.method() == Method::GET && seq_str.is_none();
     if is_downlink {
-        handle_get(req, inner, session_id.as_deref(), peer).await
+        handle_get(req, inner, session_id.as_deref(), peer, origin).await
     } else {
-        handle_post(req, inner, session_id.as_deref(), seq_str.as_deref(), peer).await
+        handle_post(req, inner, session_id.as_deref(), seq_str.as_deref(), peer, origin).await
     }
 }
 
@@ -303,6 +336,7 @@ async fn handle_get(
     inner: &Arc<ServerInner>,
     session_id: Option<&str>,
     peer: SocketAddr,
+    origin: Option<String>,
 ) -> Response<ResponseBody> {
     // ── stream-one：无 sessionId ────────────────────────────────────────────
     if session_id.is_none() {
@@ -333,7 +367,8 @@ async fn handle_get(
         let xhs = XhttpStream::new(up_rx, down_tx);
         let _ = inner.ready_tx.send(xhs).await;
 
-        return downlink_response(down_rx);
+        // stream-one 无 session，无需 cleanup
+        return downlink_response(down_rx, origin.as_deref(), None);
     }
 
     // ── stream-down：有 sessionId ───────────────────────────────────────────
@@ -345,29 +380,53 @@ async fn handle_get(
         Some(r) => r,
         None => {
             warn!("[xhttp] {peer} duplicate GET for session {sid}");
-            return plain(StatusCode::CONFLICT);
+            return plain_with_cors(StatusCode::CONFLICT, origin.as_deref());
         }
     };
     let down_rx = match session.down_rx.take() {
         Some(r) => r,
         None => {
             warn!("[xhttp] {peer} down_rx already taken for session {sid}");
-            return plain(StatusCode::CONFLICT);
+            return plain_with_cors(StatusCode::CONFLICT, origin.as_deref());
         }
     };
-    let down_tx = session.down_tx.clone();
+    // 关键修复：take（不是 clone）。这样当 XhttpStream 释放 down_tx 后，
+    // channel 的所有 sender 都消失，down_rx 才会返回 None，GET 响应才能正常结束。
+    let down_tx = match session.down_tx.take() {
+        Some(t) => t,
+        None => {
+            warn!("[xhttp] {peer} down_tx already taken for session {sid}");
+            return plain_with_cors(StatusCode::CONFLICT, origin.as_deref());
+        }
+    };
 
-    // 通知 TTL 任务：GET 已到达
+    // 通知 TTL 任务：GET 已到达（TTL 任务不再做清理，交给 cleanup 回调）
     session.get_arrived.notify_one();
     drop(session);
     // 不从 map 移除 session！up_tx 留在 session 里，后续 POST 仍可通过 map 拿到。
-    // session 的清理由 TTL 任务负责（GET 到达后 TTL 会延长到连接超时）。
+    // session 的清理在 GET 响应流结束时由 cleanup 回调执行（对齐 Xray
+    // hub.go 的 `defer h.sessions.Delete(sessionId)`）。
 
     // 构造 XhttpStream，推入 ready_tx
     let xhs = XhttpStream::new(up_rx, down_tx);
     let _ = inner.ready_tx.send(xhs).await;
 
-    downlink_response(down_rx)
+    // cleanup：GET 响应流结束（down_rx 返回 None）时移除 session。
+    // 此时 XhttpStream 已被 drop（down_tx 释放），后续 POST 会发现 session 不存在
+    // 而创建新 session（客户端应已感知连接断开）。
+    let inner_clone = Arc::clone(inner);
+    let sid_owned = sid.to_string();
+    let cleanup: Option<Box<dyn FnOnce() + Send + 'static>> = Some(Box::new(move || {
+        tokio::spawn(async move {
+            if let Some(s) = inner_clone.sessions.lock().await.remove(&sid_owned) {
+                debug!("[xhttp] session removed on GET response end");
+                // 关闭 up_tx，让 XhttpStream::poll_read（如果还在读）感知 EOF
+                let _ = s.lock().await.up_tx.send(UploadPacket::Eof).await;
+            }
+        });
+    }));
+
+    downlink_response(down_rx, origin.as_deref(), cleanup)
 }
 
 /// POST/PUT handler：接收上行数据
@@ -377,6 +436,7 @@ async fn handle_post(
     session_id: Option<&str>,
     seq_str: Option<&str>,
     peer: SocketAddr,
+    origin: Option<String>,
 ) -> Response<ResponseBody> {
     let up_tx = if let Some(sid) = session_id {
         let session_arc = get_or_create_session(inner, sid).await;
@@ -385,7 +445,7 @@ async fn handle_post(
     } else {
         // POST 无 sessionId 不常见，忽略
         warn!("[xhttp] {peer} POST without sessionId");
-        return plain(StatusCode::BAD_REQUEST);
+        return plain_with_cors(StatusCode::BAD_REQUEST, origin.as_deref());
     };
 
     match seq_str {
@@ -412,6 +472,8 @@ async fn handle_post(
                 // body 读完或出错时发送 Eof，让 XhttpStream::poll_read 能感知上行结束
                 let _ = up_tx.send(UploadPacket::Eof).await;
             });
+            // 对齐 Xray hub.go：stream-up 响应也设置 X-Accel-Buffering / Cache-Control
+            return stream_up_response(origin.as_deref());
         }
         Some(s) => {
             // packet-up: collect the body synchronously before returning 200 OK.
@@ -421,52 +483,98 @@ async fn handle_post(
                 Ok(n) => n,
                 Err(_) => {
                     warn!("[xhttp] {peer} invalid seq: {s}");
-                    return plain(StatusCode::BAD_REQUEST);
+                    return plain_with_cors(StatusCode::BAD_REQUEST, origin.as_deref());
                 }
             };
             let body = req.into_body();
-            match body.collect().await {
+            let had_body = match body.collect().await {
                 Ok(c) => {
+                    let bytes = c.to_bytes();
+                    let had = !bytes.is_empty();
                     let _ = up_tx
                         .send(UploadPacket::Packet {
                             seq,
-                            data: c.to_bytes(),
+                            data: bytes,
                         })
                         .await;
+                    had
                 }
-                Err(e) => debug!("[xhttp] {peer} packet-up collect: {e}"),
+                Err(e) => {
+                    debug!("[xhttp] {peer} packet-up collect: {e}");
+                    return plain_with_cors(StatusCode::BAD_REQUEST, origin.as_deref());
+                }
+            };
+            // 对齐 Xray hub.go：无 body 的 POST 默认会被中间件缓存，需显式 no-store
+            if !had_body {
+                return packet_up_response_no_body(origin.as_deref());
             }
         }
     }
 
-    plain(StatusCode::OK)
+    plain_with_cors(StatusCode::OK, origin.as_deref())
 }
 
-fn downlink_response(down_rx: mpsc::Receiver<bytes::Bytes>) -> Response<ResponseBody> {
-    Response::builder()
+/// 对齐 Xray `Config.WriteResponseHeader`（`splithttp/config.go`）：
+///   - 无 Origin → `Access-Control-Allow-Origin: *`
+///   - 有 Origin → 回写该 Origin（浏览器 credentials 模式必需）
+fn cors_origin_header(builder: http::response::Builder, origin: Option<&str>) -> http::response::Builder {
+    match origin {
+        Some(o) => builder
+            .header("Access-Control-Allow-Origin", o)
+            .header("Access-Control-Allow-Credentials", "true")
+            .header("Vary", "Origin"),
+        None => builder.header("Access-Control-Allow-Origin", "*"),
+    }
+}
+
+fn downlink_response(
+    down_rx: mpsc::Receiver<bytes::Bytes>,
+    origin: Option<&str>,
+    cleanup: Option<Box<dyn FnOnce() + Send + 'static>>,
+) -> Response<ResponseBody> {
+    let builder = Response::builder()
         .status(StatusCode::OK)
         // text/event-stream makes nginx and CDN middleboxes disable buffering,
         // matching Xray's hub.go behavior (NoSSEHeader=false by default)
         .header("Content-Type", "text/event-stream")
         .header("Cache-Control", "no-store")
-        .header("Access-Control-Allow-Origin", "*")
-        .header("X-Accel-Buffering", "no")
-        .body(ResponseBody::Stream(down_rx))
-        .unwrap()
+        .header("X-Accel-Buffering", "no");
+    let builder = cors_origin_header(builder, origin);
+    builder.body(ResponseBody::Stream { rx: down_rx, cleanup }).unwrap()
 }
 
-fn plain(code: StatusCode) -> Response<ResponseBody> {
-    Response::builder()
-        .status(code)
-        .header("Access-Control-Allow-Origin", "*")
-        .body(ResponseBody::Empty)
-        .unwrap()
-}
-
-fn cors_ok() -> Response<ResponseBody> {
-    Response::builder()
+/// stream-up 响应：对齐 Xray hub.go，设置 X-Accel-Buffering / Cache-Control
+fn stream_up_response(origin: Option<&str>) -> Response<ResponseBody> {
+    let builder = Response::builder()
         .status(StatusCode::OK)
-        .header("Access-Control-Allow-Origin", "*")
+        .header("X-Accel-Buffering", "no")
+        .header("Cache-Control", "no-store");
+    let builder = cors_origin_header(builder, origin);
+    builder.body(ResponseBody::Empty).unwrap()
+}
+
+/// packet-up 无 body 响应：对齐 Xray hub.go `len(bodyPayload) == 0` 分支，
+/// 显式设置 Cache-Control: no-store 防止中间件缓存无 body 的 POST 响应。
+fn packet_up_response_no_body(origin: Option<&str>) -> Response<ResponseBody> {
+    let builder = Response::builder()
+        .status(StatusCode::OK)
+        .header("Cache-Control", "no-store");
+    let builder = cors_origin_header(builder, origin);
+    builder.body(ResponseBody::Empty).unwrap()
+}
+
+fn plain_with_cors(code: StatusCode, origin: Option<&str>) -> Response<ResponseBody> {
+    let builder = Response::builder().status(code);
+    let builder = cors_origin_header(builder, origin);
+    builder.body(ResponseBody::Empty).unwrap()
+}
+
+fn cors_ok(origin: Option<&str>) -> Response<ResponseBody> {
+    let builder = Response::builder().status(StatusCode::OK);
+    let builder = cors_origin_header(builder, origin);
+    // 对齐 Xray WriteResponseHeader：回显客户端请求的 Methods/Headers，
+    // 缺省时用 `*`。
+    builder
         .header("Access-Control-Allow-Methods", "GET, POST, PUT, OPTIONS")
         .header("Access-Control-Allow-Headers", "Content-Type")
         .body(ResponseBody::Empty)
@@ -477,7 +585,12 @@ fn cors_ok() -> Response<ResponseBody> {
 
 enum ResponseBody {
     Empty,
-    Stream(mpsc::Receiver<bytes::Bytes>),
+    Stream {
+        rx: mpsc::Receiver<bytes::Bytes>,
+        /// 响应流结束（poll_frame 返回 None）时执行一次，用于清理 session。
+        /// 对齐 Xray hub.go 的 `defer h.sessions.Delete(sessionId)`。
+        cleanup: Option<Box<dyn FnOnce() + Send + 'static>>,
+    },
 }
 
 impl http_body::Body for ResponseBody {
@@ -490,9 +603,15 @@ impl http_body::Body for ResponseBody {
     ) -> Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
         match self.get_mut() {
             ResponseBody::Empty => Poll::Ready(None),
-            ResponseBody::Stream(rx) => match rx.poll_recv(cx) {
+            ResponseBody::Stream { rx, cleanup } => match rx.poll_recv(cx) {
                 Poll::Pending => Poll::Pending,
-                Poll::Ready(None) => Poll::Ready(None),
+                Poll::Ready(None) => {
+                    // 响应流结束：触发 cleanup（移除 session），对齐 Xray hub.go
+                    if let Some(c) = cleanup.take() {
+                        c();
+                    }
+                    Poll::Ready(None)
+                }
                 Poll::Ready(Some(d)) => Poll::Ready(Some(Ok(http_body::Frame::data(d)))),
             },
         }
@@ -641,9 +760,11 @@ impl AsyncWrite for XhttpStream {
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        // 关闭下行 channel：drop PollSender 会让 down_rx 收到 None，
-        // 从而结束 GET 响应流（ResponseBody::Stream 返回 None），
-        // 客户端的下行读取才会收到 EOF。
+        // 关闭下行 channel：close() 释放 PollSender 持有的 down_tx。
+        // 由于 handle_get 现在用 take()（不再 clone），session 里已无 down_tx，
+        // down_tx 全部释放后 down_rx 收到 None → GET 响应流结束
+        // → ResponseBody::Stream 的 cleanup 回调移除 session（对齐 Xray hub.go
+        // 的 `defer h.sessions.Delete(sessionId)`）。
         // 不关闭的话，远程目标已断开但 GET 响应流永远不结束，
         // 客户端的 relay downlink 永远读不到 EOF → 连接挂死。
         self.down_tx.close();
@@ -658,7 +779,57 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_normalized_path() {
+        // 默认 `/` 不能被规范化成 `//`（原 bug）
+        assert_eq!(XhttpConfig::default().normalized_path(), "/");
+        // 空 path
+        assert_eq!(
+            XhttpConfig {
+                path: "".into(),
+                host: None,
+            }
+            .normalized_path(),
+            "/"
+        );
+        // 普通 path
+        assert_eq!(
+            XhttpConfig {
+                path: "/vless".into(),
+                host: None,
+            }
+            .normalized_path(),
+            "/vless/"
+        );
+        // 多余尾斜杠
+        assert_eq!(
+            XhttpConfig {
+                path: "/vless//".into(),
+                host: None,
+            }
+            .normalized_path(),
+            "/vless/"
+        );
+        // 无前导斜杠
+        assert_eq!(
+            XhttpConfig {
+                path: "vless".into(),
+                host: None,
+            }
+            .normalized_path(),
+            "/vless/"
+        );
+    }
+
+    #[test]
     fn test_parse_path() {
+        // 默认 base `/`（修复后）
+        assert_eq!(parse_path("/", "/"), Some((None, None)));
+        assert_eq!(parse_path("/sid", "/"), Some((Some("sid".into()), None)));
+        assert_eq!(
+            parse_path("/sid/42", "/"),
+            Some((Some("sid".into()), Some("42".into())))
+        );
+
         let base = "/vless/";
         assert_eq!(parse_path("/vless", base), Some((None, None)));
         assert_eq!(parse_path("/vless/", base), Some((None, None)));
