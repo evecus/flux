@@ -229,6 +229,22 @@ pub struct TransportConfig {
     #[serde(default = "default_ws_path")]
     pub ws_path: String,
     pub ws_host: Option<String>,
+    /// WebSocket 0-RTT 早期数据最大字节数。对齐 sing-box V2RayWebsocketOptions.MaxEarlyData。
+    /// - 0（默认）：不启用早期数据。
+    /// - >0：启用早期数据。配合 `ws_early_data_header_name` 决定传递方式。
+    ///
+    /// 早期数据允许客户端在 WebSocket 升级请求中携带首批负载数据，减少一个 RTT。
+    /// v2rayN / Clash 等客户端常用 `?ed=2560` 风格的路径早期数据。
+    #[serde(default)]
+    pub ws_max_early_data: u32,
+    /// 早期数据传递的 HTTP 头名称。对齐 sing-box V2RayWebsocketOptions.EarlyDataHeaderName。
+    /// - None（默认）：早期数据以 base64url 编码追加到 URL 路径末尾（如 `/path<base64>`）。
+    /// - Some("Sec-WebSocket-Protocol")：早期数据通过该 HTTP 头传递（Xray 风格）。
+    #[serde(default)]
+    pub ws_early_data_header_name: Option<String>,
+    /// 自定义 HTTP 请求头（如 User-Agent）。对齐 sing-box V2RayWebsocketOptions.Headers。
+    #[serde(default)]
+    pub ws_headers: Option<HashMap<String, String>>,
     #[serde(default = "default_xhttp_path")]
     pub xhttp_path: String,
     pub xhttp_host: Option<String>,
@@ -240,6 +256,9 @@ impl Default for TransportConfig {
             r#type: default_transport_type(),
             ws_path: default_ws_path(),
             ws_host: None,
+            ws_max_early_data: 0,
+            ws_early_data_header_name: None,
+            ws_headers: None,
             xhttp_path: default_xhttp_path(),
             xhttp_host: None,
         }
