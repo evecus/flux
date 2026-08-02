@@ -88,13 +88,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Delete old test release and tag
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release delete test --yes 2>/dev/null || true
-          git push origin --delete refs/tags/test 2>/dev/null || true
-
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
