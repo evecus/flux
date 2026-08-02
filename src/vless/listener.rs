@@ -156,8 +156,6 @@ async fn handle_conn(
     tls_acceptor: Option<Arc<TlsAcceptor>>,
 ) -> Result<()> {
     let transport_type = cfg.transport.r#type.as_str();
-    let ws_path = cfg.transport.ws_path.as_str();
-    let ws_host = cfg.transport.ws_host.as_deref();
     let bind_ip = OutboundBind::new(cfg.outbound_bind_ipv4, cfg.outbound_bind_ipv6);
 
     match (transport_type, &cfg.tls) {
@@ -186,7 +184,8 @@ async fn handle_conn(
         // ── WS, no TLS ────────────────────────────────────────────────────
         ("ws", None) => {
             debug!("[vless] {peer} → WS");
-            let ws = shared_ws::accept_plain(stream, ws_path, ws_host).await?;
+            let ws = shared_ws::accept_plain(stream, &shared_ws::opts_from_transport(&cfg.transport))
+                .await?;
             process_vless_stream(ws, peer, uuid_bytes, bind_ip).await
         }
         // ── WS + standard TLS ─────────────────────────────────────────────
@@ -198,14 +197,18 @@ async fn handle_conn(
                 .accept(stream)
                 .await
                 .map_err(|e| anyhow::anyhow!("vless WS+TLS handshake failed: {e}"))?;
-            let ws = shared_ws::accept_tls(tls_stream, ws_path, ws_host).await?;
+            let ws =
+                shared_ws::accept_tls(tls_stream, &shared_ws::opts_from_transport(&cfg.transport))
+                    .await?;
             process_vless_stream(ws, peer, uuid_bytes, bind_ip).await
         }
         // ── WS + Reality ──────────────────────────────────────────────────
         ("ws", Some(VlessTlsConfig::Reality(reality_cfg))) => {
             debug!("[vless] {peer} → WS+Reality");
             let reality_stream = vless_reality::accept(stream, peer, reality_cfg).await?;
-            let ws = shared_ws::accept_tls(reality_stream, ws_path, ws_host).await?;
+            let ws =
+                shared_ws::accept_tls(reality_stream, &shared_ws::opts_from_transport(&cfg.transport))
+                    .await?;
             process_vless_stream(ws, peer, uuid_bytes, bind_ip).await
         }
         (other, _) => anyhow::bail!("vless: unknown transport type '{other}'"),
