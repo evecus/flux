@@ -6,10 +6,13 @@
 //!   [16B] UUID      — client identity
 //!   [1B]  addon_len — length of protobuf addons (we skip, always 0 for flow=none)
 //!   [NB]  addons    — ignored (flow control, xtls, etc.)
-//!   [1B]  command   — 0x01=TCP, 0x02=UDP (we only handle TCP)
-//!   [2B]  port      — big-endian u16  ← PortThenAddress() in Xray
-//!   [1B]  addr_type — 0x01=IPv4, 0x02=Domain, 0x03=IPv6
-//!   ...   addr      — 4B / (1B len + NB) / 16B
+//!   [1B]  command   — 0x01=TCP, 0x02=UDP, 0x03=Mux, 0x04=Rvs
+//!                     对 Mux/Rvs，Xray 不读地址，而是把目标固定为
+//!                     "v1.mux.cool" / "v1.rvs.cool"（见 encoding.go）。
+//!   仅 TCP/UDP 时才读 PortThenAddress:
+//!     [2B]  port      — big-endian u16  ← PortThenAddress() in Xray
+//!     [1B]  addr_type — 0x01=IPv4, 0x02=Domain, 0x03=IPv6
+//!     ...   addr      — 4B / (1B len + NB) / 16B
 //!
 //! Response wire format (EncodeResponseHeader):
 //!   [1B]  version   — echo client version (0x00)
@@ -36,6 +39,12 @@ pub const VLESS_VERSION: u8 = 0x00;
 /// Request commands (mirrors Xray protocol.RequestCommand)
 pub const CMD_TCP: u8 = 0x01;
 pub const CMD_UDP: u8 = 0x02;
+/// Mux：Xray 在该命令下不读地址，目标固定为 "v1.mux.cool"。
+/// 服务端把它当作一个虚拟 TCP 流处理，外层由 mux 子协议承载多个子连接。
+pub const CMD_MUX: u8 = 0x03;
+/// Rvs (Reverse)：Xray 反向代理，目标固定为 "v1.rvs.cool"。
+/// 我们不实现反向代理，但需要正确跳过地址字段，不能误读。
+pub const CMD_RVS: u8 = 0x04;
 
 /// Address type bytes (mirrors Xray AddressFamilyByte assignments in encoding.go)
 const ATYP_IPV4: u8 = 0x01;
@@ -47,7 +56,8 @@ const ATYP_IPV6: u8 = 0x03;
 #[derive(Debug)]
 pub struct VlessRequest {
     pub command: u8,
-    /// Resolved target as "host:port"
+    /// Resolved target as "host:port"。
+    /// Mux/Rvs 命令下由协议常量推导（"v1.mux.cool:0" / "v1.rvs.cool:0"）。
     pub target: String,
 }
 
@@ -55,12 +65,13 @@ pub struct VlessRequest {
 
 /// Decode a VLESS request header from `reader`.
 ///
-/// Steps (directly mapping Xray's DecodeRequestHeader):
+/// 严格对齐 Xray `encoding.DecodeRequestHeader`：
 ///   1. version check
 ///   2. UUID read + validate against expected bytes
 ///   3. skip addon bytes (protobuf, length-prefixed)
 ///   4. command byte
-///   5. PortThenAddress: port (2B BE) then addr_type + addr bytes
+///   5. 仅 TCP/UDP 才读 PortThenAddress；
+///      Mux → 目标固定 "v1.mux.cool"，Rvs → 目标固定 "v1.rvs.cool"。
 ///
 /// On success returns the parsed request; the stream is positioned at the
 /// first byte of the proxied payload.
@@ -91,23 +102,34 @@ where
 
     // 4. Command byte
     let command = reader.read_u8().await?;
-    if command != CMD_TCP && command != CMD_UDP {
-        bail!("vless: unsupported command {command:#x}");
-    }
 
-    // 5. PortThenAddress (matches Xray portFirstAddressParser.ReadAddressPort)
-    //    port is 2B big-endian, then addr_type + addr
-    let port = reader.read_u16().await?; // big-endian
-    let addr = read_address(reader).await?;
+    // 5. 仅 TCP/UDP 才读 PortThenAddress（对齐 Xray encoding.go 的 switch）。
+    //    Mux/Rvs 在 Xray 中目标地址被硬编码为 "v1.mux.cool" / "v1.rvs.cool"，
+    //    协议头里没有地址字段；如果错误地读地址会破坏流。
+    let target = match command {
+        CMD_TCP | CMD_UDP => {
+            // PortThenAddress (matches Xray portFirstAddressParser.ReadAddressPort)
+            //    port is 2B big-endian, then addr_type + addr
+            let port = reader.read_u16().await?; // big-endian
+            let addr = read_address(reader).await?;
+            format!("{addr}:{port}")
+        }
+        CMD_MUX => "v1.mux.cool:0".to_string(),
+        CMD_RVS => "v1.rvs.cool:0".to_string(),
+        _ => bail!("vless: unsupported command {command:#x}"),
+    };
 
-    let target = format!("{addr}:{port}");
     debug!("vless: decoded request cmd={command:#x} target={target}");
 
     Ok(VlessRequest { command, target })
 }
 
 /// Read the address portion (addr_type + addr bytes).
-/// Mirrors Xray addressParser.readAddress().
+/// Mirrors Xray `addressParser.readAddress()` in `common/protocol/address.go`.
+///
+/// Xray 对域名做两步处理（我们这里对齐）：
+///   1. 若首字符可能是 IP 前缀（`[` 或数字），尝试按 IP 解析；解析成功则当 IP 用。
+///   2. 否则做 `isValidDomain` 校验，含非法字符则报错。
 async fn read_address<R>(reader: &mut R) -> Result<String>
 where
     R: AsyncRead + Unpin,
@@ -130,6 +152,21 @@ where
             let mut domain_buf = vec![0u8; domain_len];
             reader.read_exact(&mut domain_buf).await?;
             let domain = String::from_utf8(domain_buf)?;
+
+            // Xray maybeIPPrefix: '[' (IPv6 字面量) 或数字开头尝试按 IP 解析
+            if let Some(first) = domain.bytes().next() {
+                if first == b'[' || first.is_ascii_digit() {
+                    if let Ok(ip) = domain.trim_start_matches('[').trim_end_matches(']').parse::<std::net::IpAddr>() {
+                        return Ok(ip.to_string());
+                    }
+                    // 不是合法 IP，继续按域名校验
+                }
+            }
+
+            // Xray isValidDomain: 仅允许 [0-9a-zA-Z._-]
+            if !is_valid_domain(&domain) {
+                bail!("vless: invalid domain name: {domain}");
+            }
             Ok(domain)
         }
         ATYP_IPV6 => {
@@ -140,6 +177,14 @@ where
         }
         _ => bail!("vless: unknown address type {atyp:#x}"),
     }
+}
+
+/// 对齐 Xray `protocol.isValidDomain`：仅允许字母、数字、'-'、'.'、'_'。
+fn is_valid_domain(d: &str) -> bool {
+    !d.is_empty()
+        && d.bytes().all(|c| {
+            c.is_ascii_alphanumeric() || c == b'-' || c == b'.' || c == b'_'
+        })
 }
 
 // ── Response encoder ──────────────────────────────────────────────────────────
