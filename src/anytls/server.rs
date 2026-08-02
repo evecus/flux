@@ -122,10 +122,19 @@ async fn handle_stream(
     info!("[anytls] {peer} → {target} (stream {sid})");
 
     // Connect upstream.
-    let outbound =
-        shared_net::dial_tcp_timeout(&target, bind_ip, std::time::Duration::from_secs(10))
-            .await
-            .map_err(|e| anyhow::anyhow!("connect {target} failed: {e}"))?;
+    let outbound = match shared_net::dial_tcp_timeout(&target, bind_ip, std::time::Duration::from_secs(10)).await {
+        Ok(s) => {
+            // 拨号成功，发 SYNACK（对齐 sing-anytls Stream.HandshakeSuccess）
+            stream.handshake_success().await;
+            s
+        }
+        Err(e) => {
+            // 拨号失败，发 SYNACK 带错误信息（对齐 sing-anytls Stream.HandshakeFailure）
+            let err_msg = format!("connect {target} failed: {e}");
+            stream.handshake_failure(&err_msg).await;
+            return Err(anyhow::anyhow!(err_msg));
+        }
+    };
 
     let (mut out_r, mut out_w) = outbound.into_split();
     let t1 = target.clone();
