@@ -70,6 +70,7 @@ impl XhttpConfig {
     /// 对齐 Xray `Config.GetNormalizedPath`（`splithttp/config.go`）：
     ///   - 空或非 `/` 开头 → 前补 `/`
     ///   - 末尾保证有 `/`（便于 `parse_path` 切 sessionId/seq）
+    ///
     /// 修复：原实现对 `/` 会产出 `//`（`trim_end_matches('/')` 把 `/` 削成空串，
     /// 再 format 出 `//`），导致默认配置下所有请求都被 404。
     pub fn normalized_path(&self) -> String {
