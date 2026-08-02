@@ -1,4 +1,4 @@
-name: test
+name: ci
 
 on:
   workflow_dispatch:
@@ -6,6 +6,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+
+permissions:
+  contents: write
 
 jobs:
   check:
@@ -83,40 +86,23 @@ jobs:
         if: matrix.cross
         run: cross build --release --target ${{ matrix.target }}
 
-      - name: Rename artifact
+      - name: Rename
         run: |
-          cp target/${{ matrix.target }}/release/flux ${{ matrix.artifact }}
-          chmod +x ${{ matrix.artifact }}
+          cp target/${{ matrix.target }}/release/flux ${{ matrix.artifact }}-${{ github.run_number }}
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}
-          if-no-files-found: error
-
-  release:
-    name: Create Test Pre-release
-    needs: build
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: dist/
-          merge-multiple: true
+      - name: Archive source code
+        run: |
+          git archive --format=zip --output=test-code-${{ github.run_number }}.zip HEAD
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: test
-          name: "Test Build (Pre-release)"
+          tag_name: ci
+          name: "ci"
           prerelease: true
           draft: false
           make_latest: false
           generate_release_notes: false
-          files: dist/*
+          files: |
+            ${{ matrix.artifact }}-${{ github.run_number }}
+            test-code-${{ github.run_number }}.zip
