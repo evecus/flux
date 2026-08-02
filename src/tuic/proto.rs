@@ -130,7 +130,7 @@ pub struct AuthInfo {
 #[derive(Debug)]
 pub struct PacketInfo {
     pub assoc_id: u16,
-    pub _pkt_id: u16,
+    pub pkt_id: u16,
     pub frag_total: u8,
     pub frag_id: u8,
     pub size: u16,
@@ -185,7 +185,7 @@ impl Command {
                 let addr = Self::read_address_sync(r)?;
                 Ok(Self::Packet(PacketInfo {
                     assoc_id,
-                    _pkt_id: pkt_id,
+                    pkt_id,
                     frag_total,
                     frag_id,
                     size,
