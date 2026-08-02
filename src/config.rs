@@ -126,6 +126,11 @@ pub struct TuicConfig {
     pub auth_timeout: Duration,
     #[serde(default = "default_tuic_udp_timeout", with = "humantime_serde")]
     pub udp_timeout: Duration,
+    /// 心跳间隔。对齐 sing-box tuic.ServiceOptions.Heartbeat（默认 10s）：
+    /// 服务端定期向客户端发送 TUIC Heartbeat datagram，保持 QUIC 连接活跃，
+    /// 防止空闲超时断连。
+    #[serde(default = "default_tuic_heartbeat", with = "humantime_serde")]
+    pub heartbeat: Duration,
     #[serde(default)]
     pub udp_relay_ipv6: bool,
     #[serde(default = "default_tuic_max_udp_packet_size")]
@@ -150,6 +155,9 @@ fn default_tuic_auth_timeout() -> Duration {
 }
 fn default_tuic_udp_timeout() -> Duration {
     Duration::from_secs(30)
+}
+fn default_tuic_heartbeat() -> Duration {
+    Duration::from_secs(10)
 }
 fn default_tuic_max_udp_packet_size() -> usize {
     65535
