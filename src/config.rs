@@ -283,6 +283,14 @@ pub struct RealityConfig {
     pub short_ids: Vec<String>,
     pub dest: String,
     pub server_name: String,
+    /// 允许的客户端时间偏差（秒）。0 表示不检查（不推荐）。
+    /// 对齐 sing-box MaxTimeDiff，默认 90 秒。
+    #[serde(default = "default_reality_max_time_diff")]
+    pub max_time_diff: u64,
+}
+
+fn default_reality_max_time_diff() -> u64 {
+    90
 }
 
 // ── VLESS ─────────────────────────────────────────────────────────────────────
