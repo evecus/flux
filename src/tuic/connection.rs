@@ -23,7 +23,7 @@ use crate::{
     config::TuicConfig,
     tuic::{
         error::Error,
-        proto::{build_packet_header, Address, Command, PacketInfo, VERSION},
+        proto::{build_packet_header, Address, Command, PacketInfo, CMD_HEARTBEAT, VERSION},
     },
 };
 
@@ -76,11 +76,70 @@ impl Authenticated {
 
 // ── UDP session ───────────────────────────────────────────────────────────────
 
+/// UDP 分片重组缓冲区。
+///
+/// 对齐 sing-quic tuic.udpDefragger：TUIC 协议中，当 UDP 包超过 QUIC datagram
+/// MTU 时，客户端将其拆分为多个分片。只有 frag_id=0 携带目标地址，其余分片
+/// 的地址为空（Address::None）。服务端需收集全部分片后按 frag_id 顺序拼接。
+struct TuicFragBuffer {
+    frag_total: u8,
+    frags: Vec<Option<Bytes>>,
+    received: u8,
+    /// 来自 frag_id=0 的目标地址（其余分片地址为 None）
+    addr: Option<Address>,
+}
+
+impl TuicFragBuffer {
+    fn new(frag_total: u8, addr: Option<Address>) -> Self {
+        Self {
+            frag_total,
+            frags: vec![None; frag_total as usize],
+            received: 0,
+            addr,
+        }
+    }
+
+    /// 插入一个分片。返回 Some(payload, addr) 表示全部分片已到齐并重组完成。
+    /// 对齐 sing-quic udpDefragger.feed：重复 frag_id 不计数。
+    fn insert(&mut self, frag_id: u8, payload: Bytes, addr: Option<Address>) -> Option<(Bytes, Address)> {
+        if frag_id >= self.frag_total {
+            return None;
+        }
+        let slot = &mut self.frags[frag_id as usize];
+        if slot.is_some() {
+            return None; // 重复分片，忽略
+        }
+        *slot = Some(payload);
+        self.received += 1;
+
+        // frag_id=0 携带目标地址
+        if frag_id == 0 {
+            if let Some(a) = addr {
+                self.addr = Some(a);
+            }
+        }
+
+        if self.received >= self.frag_total {
+            let addr = self.addr.clone()?;
+            let total_len: usize = self.frags.iter().filter_map(|f| f.as_ref().map(|b| b.len())).sum();
+            let mut buf = bytes::BytesMut::with_capacity(total_len);
+            for b in self.frags.iter().flatten() {
+                buf.extend_from_slice(b);
+            }
+            Some((buf.freeze(), addr))
+        } else {
+            None
+        }
+    }
+}
+
 pub struct UdpSession {
     assoc_id: u16,
     socket_v4: UdpSocket,
     socket_v6: Option<UdpSocket>,
     close_tx: AsyncRwLock<Option<oneshot::Sender<()>>>,
+    /// 分片重组表：packet_id → FragBuffer
+    defragger: tokio::sync::Mutex<HashMap<u16, TuicFragBuffer>>,
 }
 
 impl UdpSession {
@@ -117,6 +176,7 @@ impl UdpSession {
             socket_v4,
             socket_v6,
             close_tx: AsyncRwLock::new(Some(tx)),
+            defragger: tokio::sync::Mutex::new(HashMap::new()),
         });
 
         let session_listen = session.clone();
@@ -266,6 +326,35 @@ impl Connection {
                 conn_wdog
                     .inner
                     .close(quinn::VarInt::from_u32(0), b"auth timeout");
+            }
+        });
+
+        // 对齐 sing-box tuic.loopHeartbeats：服务端定期向客户端发送 TUIC
+        // Heartbeat datagram（[VERSION, CMD_HEARTBEAT]），保持 QUIC 连接活跃，
+        // 防止空闲超时断连。sing-box 的 TUIC 不使用 QUIC 原生 keep_alive_interval
+        // （PING 帧），而是用应用层 Heartbeat datagram 作为保活机制。
+        let conn_hb = self.clone();
+        let heartbeat = self.cfg.heartbeat;
+        tokio::spawn(async move {
+            let mut ticker = time::interval(heartbeat);
+            // 跳过第一次立即触发（连接刚建立，无需立即发心跳）
+            ticker.tick().await;
+            loop {
+                if conn_hb.inner.close_reason().is_some() {
+                    return;
+                }
+                ticker.tick().await;
+                if conn_hb.inner.close_reason().is_some() {
+                    return;
+                }
+                // SendDatagram([Version, CommandHeartbeat])
+                if let Err(e) = conn_hb
+                    .inner
+                    .send_datagram(Bytes::from_static(&[VERSION, CMD_HEARTBEAT]))
+                {
+                    debug!("[TUIC] {peer} send heartbeat failed: {e}");
+                    return;
+                }
             }
         });
 
@@ -512,31 +601,14 @@ impl Connection {
 
         let assoc_id = info.assoc_id;
         info!(
-            "[TUIC][UDP][{assoc_id:#06x}] pkt {}/{} from {}",
+            "[TUIC][UDP][{assoc_id:#06x}] pkt {} frag {}/{} from {}",
+            info.pkt_id,
             info.frag_id + 1,
             info.frag_total,
             info.addr
         );
 
-        // Fragmentation: only support frag_total=1 for now (no reassembly needed for simple case)
-        if info.frag_total != 1 {
-            warn!("[TUIC][UDP][{assoc_id:#06x}] fragmented UDP not yet reassembled (frag {}/{}), dropping", info.frag_id + 1, info.frag_total);
-            return;
-        }
-
-        // Resolve target
-        let target_addr = match self.resolve_addr(&info.addr).await {
-            Ok(a) => a,
-            Err(e) => {
-                warn!(
-                    "[TUIC][UDP][{assoc_id:#06x}] resolve {} failed: {e}",
-                    info.addr
-                );
-                return;
-            }
-        };
-
-        // Get or create UDP session
+        // Get or create UDP session（提前创建，分片重组表在 session 内）
         let session = {
             let mut sessions = self.udp_sessions.lock().await;
             if let Some(s) = sessions.get(&assoc_id) {
@@ -561,8 +633,78 @@ impl Connection {
             }
         };
 
-        if let Err(e) = session.send(payload, target_addr).await {
-            warn!("[TUIC][UDP][{assoc_id:#06x}] send to {target_addr}: {e}");
+        // ── 分片处理 ──────────────────────────────────────────────────────
+        //
+        // 对齐 sing-quic tuic.udpDefragger：当 frag_total > 1 时，只有 frag_id=0
+        // 携带目标地址（Address），其余分片的地址为 None。服务端需收集全部分片
+        // 后按 frag_id 顺序拼接，再使用 frag_id=0 的地址发送。
+        //
+        // frag_total == 1：直接发送，无需重组。
+        // frag_total > 1：送入 defragger，全部分片到齐后发送。
+
+        if info.frag_total <= 1 {
+            // 无分片，直接发送
+            let target_addr = match self.resolve_addr(&info.addr).await {
+                Ok(a) => a,
+                Err(e) => {
+                    warn!(
+                        "[TUIC][UDP][{assoc_id:#06x}] resolve {} failed: {e}",
+                        info.addr
+                    );
+                    return;
+                }
+            };
+            if let Err(e) = session.send(payload, target_addr).await {
+                warn!("[TUIC][UDP][{assoc_id:#06x}] send to {target_addr}: {e}");
+            }
+            return;
+        }
+
+        // 分片重组
+        let pkt_id = info.pkt_id;
+        let frag_id = info.frag_id;
+        let frag_total = info.frag_total;
+
+        // 对于 frag_id=0，地址有效；其余分片地址为 None
+        let frag_addr = if frag_id == 0 {
+            Some(info.addr.clone())
+        } else {
+            None
+        };
+
+        let reassembled = {
+            let mut defragger = session.defragger.lock().await;
+            let buf = defragger
+                .entry(pkt_id)
+                .or_insert_with(|| TuicFragBuffer::new(frag_total, frag_addr.clone()));
+            match buf.insert(frag_id, payload, frag_addr) {
+                Some((data, addr)) => {
+                    defragger.remove(&pkt_id);
+                    Some((data, addr))
+                }
+                None => None,
+            }
+        };
+
+        if let Some((data, addr)) = reassembled {
+            let target_addr = match self.resolve_addr(&addr).await {
+                Ok(a) => a,
+                Err(e) => {
+                    warn!(
+                        "[TUIC][UDP][{assoc_id:#06x}] resolve {} (reassembled) failed: {e}",
+                        addr
+                    );
+                    return;
+                }
+            };
+            debug!(
+                "[TUIC][UDP][{assoc_id:#06x}] reassembled pkt {} ({} bytes) → {target_addr}",
+                pkt_id,
+                data.len()
+            );
+            if let Err(e) = session.send(data, target_addr).await {
+                warn!("[TUIC][UDP][{assoc_id:#06x}] send reassembled to {target_addr}: {e}");
+            }
         }
     }
 
@@ -686,7 +828,7 @@ impl Connection {
                 let addr = Address::read_from(recv).await.map_err(Error::Io)?;
                 Ok(Command::Packet(PacketInfo {
                     assoc_id,
-                    _pkt_id: pkt_id,
+                    pkt_id,
                     frag_total,
                     frag_id,
                     size,
