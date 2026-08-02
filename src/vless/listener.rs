@@ -16,7 +16,7 @@ use crate::common::tls::standard as shared_tls;
 use crate::common::transport::websocket as shared_ws;
 use crate::common::transport::xhttp::{XhttpConfig, XhttpServer};
 use crate::config::{VlessConfig, VlessTlsConfig};
-use crate::vless::protocol::{decode_request, encode_response, parse_uuid, CMD_TCP, CMD_UDP};
+use crate::vless::protocol::{decode_request, encode_response, parse_uuid, CMD_TCP, CMD_UDP, CMD_MUX, CMD_RVS};
 use crate::vless::tls::reality as vless_reality;
 
 pub async fn run(cfg: Arc<VlessConfig>) -> Result<()> {
@@ -236,6 +236,17 @@ where
         CMD_UDP => {
             info!("[vless] {peer} → {} (udp)", request.target);
             relay_udp(stream, peer, bind_ip).await
+        }
+        // Mux/Rvs：Xray 在协议头里固定目标为 "v1.mux.cool" / "v1.rvs.cool"，
+        // 真实子连接由 mux 子协议在数据流里承载。我们没有实现 mux 服务端，
+        // 不能直接当作去往 "v1.mux.cool" 的 TCP 拨号（会 DNS 失败），
+        // 这里明确拒绝并关闭连接，避免无意义的拨号尝试和日志噪声。
+        CMD_MUX | CMD_RVS => {
+            warn!(
+                "[vless] {peer} unsupported command {:#x} (mux/rvs not implemented)",
+                request.command
+            );
+            anyhow::bail!("vless: mux/rvs not implemented")
         }
         other => anyhow::bail!("vless: unsupported command {other:#x}"),
     }
