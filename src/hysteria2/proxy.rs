@@ -270,10 +270,7 @@ impl FragBuffer {
         // 对齐 sing-box udpDefragger.feed：仅在新 frag_id 时递增计数，
         // 重复分片不计数（or_insert 已保证幂等），避免 received 提前达到 total
         // 导致错误重组。
-        let is_new = self
-            .frags
-            .insert(frag_id, payload)
-            .is_none();
+        let is_new = self.frags.insert(frag_id, payload).is_none();
         if is_new {
             self.received += 1;
         }

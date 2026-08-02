@@ -266,12 +266,8 @@ fn verify_reality_client(record: &[u8], cfg: &RealityConfig) -> Result<[u8; 32]>
     // sing-box 在 tls.go:202-207 检查时间偏差。Flux 原先完全跳过此项，
     // 存在重放攻击风险——攻击者可记录并重放认证包。
     if cfg.max_time_diff > 0 && plaintext.len() >= 8 {
-        let client_time = u32::from_be_bytes([
-            plaintext[4],
-            plaintext[5],
-            plaintext[6],
-            plaintext[7],
-        ]) as i64;
+        let client_time =
+            u32::from_be_bytes([plaintext[4], plaintext[5], plaintext[6], plaintext[7]]) as i64;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()

@@ -29,16 +29,12 @@ use std::{
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use shadowquic::{
-    Inbound, ProxyRequest,
     config::{AuthUser, CongestionControl, JlsUpstream, ShadowQuicServerCfg},
     shadowquic::inbound::ShadowQuicServer,
+    Inbound, ProxyRequest,
 };
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
-use tokio::{
-    io::AsyncWriteExt,
-    net::UdpSocket,
-    sync::Mutex,
-};
+use tokio::{io::AsyncWriteExt, net::UdpSocket, sync::Mutex};
 use tracing::{debug, info, warn};
 
 use crate::{common::net::OutboundBind, config::ShadowquicConfig};
@@ -59,7 +55,10 @@ pub async fn run(cfg: Arc<ShadowquicConfig>) -> Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("shadowquic server init failed: {e}"))?;
 
-    info!("[ShadowQuic] listening on {bind_addr}, users: {}", cfg.users.len());
+    info!(
+        "[ShadowQuic] listening on {bind_addr}, users: {}",
+        cfg.users.len()
+    );
 
     loop {
         match server.accept().await {
@@ -124,16 +123,11 @@ async fn handle_tcp(
 
 // ── UDP ──────────────────────────────────────────────────────────────────────
 
-async fn handle_udp(
-    udp_session: shadowquic::UdpSession,
-    cfg: &ShadowquicConfig,
-) -> Result<()> {
+async fn handle_udp(udp_session: shadowquic::UdpSession, cfg: &ShadowquicConfig) -> Result<()> {
     // 创建 v4 + 可选 v6 UDP socket（支持 outbound_bind）
-    let socket_v4 = create_udp_socket(cfg.outbound_bind_ipv4)
-        .context("create udp v4 socket")?;
+    let socket_v4 = create_udp_socket(cfg.outbound_bind_ipv4).context("create udp v4 socket")?;
     let socket_v6 = if cfg.udp_relay_ipv6 {
-        Some(create_udp_socket_v6(cfg.outbound_bind_ipv6)
-            .context("create udp v6 socket")?)
+        Some(create_udp_socket_v6(cfg.outbound_bind_ipv6).context("create udp v6 socket")?)
     } else {
         None
     };

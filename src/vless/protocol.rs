@@ -156,7 +156,11 @@ where
             // Xray maybeIPPrefix: '[' (IPv6 字面量) 或数字开头尝试按 IP 解析
             if let Some(first) = domain.bytes().next() {
                 if first == b'[' || first.is_ascii_digit() {
-                    if let Ok(ip) = domain.trim_start_matches('[').trim_end_matches(']').parse::<std::net::IpAddr>() {
+                    if let Ok(ip) = domain
+                        .trim_start_matches('[')
+                        .trim_end_matches(']')
+                        .parse::<std::net::IpAddr>()
+                    {
                         return Ok(ip.to_string());
                     }
                     // 不是合法 IP，继续按域名校验
@@ -182,9 +186,8 @@ where
 /// 对齐 Xray `protocol.isValidDomain`：仅允许字母、数字、'-'、'.'、'_'。
 fn is_valid_domain(d: &str) -> bool {
     !d.is_empty()
-        && d.bytes().all(|c| {
-            c.is_ascii_alphanumeric() || c == b'-' || c == b'.' || c == b'_'
-        })
+        && d.bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'.' || c == b'_')
 }
 
 // ── Response encoder ──────────────────────────────────────────────────────────
@@ -235,10 +238,7 @@ pub fn parse_uuid(s: &str) -> Result<[u8; 16]> {
 /// 读取一个 packetaddr 帧，返回 (源/目标地址, payload)。
 ///
 /// `reader` 位置应在帧起始（即 2 字节长度前缀处）。
-pub async fn read_packet<'a, R>(
-    reader: &mut R,
-    buf: &'a mut [u8],
-) -> Result<(SocketAddr, &'a [u8])>
+pub async fn read_packet<'a, R>(reader: &mut R, buf: &'a mut [u8]) -> Result<(SocketAddr, &'a [u8])>
 where
     R: AsyncRead + Unpin,
 {
@@ -247,10 +247,7 @@ where
         bail!("vless: packetaddr: zero-length frame");
     }
     if len > buf.len() {
-        bail!(
-            "vless: packetaddr: frame too large ({len} > {})",
-            buf.len()
-        );
+        bail!("vless: packetaddr: frame too large ({len} > {})", buf.len());
     }
     let frame = &mut buf[..len];
     reader.read_exact(frame).await?;
@@ -258,7 +255,10 @@ where
     // frame = ATYP + addr + port(2) + payload
     let atyp = frame[0];
     let (addr_len, ip) = match atyp {
-        ATYP_IPV4 => (4, std::net::IpAddr::V4(Ipv4Addr::from([frame[1], frame[2], frame[3], frame[4]]))),
+        ATYP_IPV4 => (
+            4,
+            std::net::IpAddr::V4(Ipv4Addr::from([frame[1], frame[2], frame[3], frame[4]])),
+        ),
         ATYP_IPV6 => {
             let mut b = [0u8; 16];
             b.copy_from_slice(&frame[1..17]);
@@ -278,11 +278,7 @@ where
 /// 写一个 packetaddr 帧。
 ///
 /// `writer` 位置应在帧起始处；写完后流位置指向下一帧。
-pub async fn write_packet<W>(
-    writer: &mut W,
-    src: SocketAddr,
-    payload: &[u8],
-) -> Result<()>
+pub async fn write_packet<W>(writer: &mut W, src: SocketAddr, payload: &[u8]) -> Result<()>
 where
     W: AsyncWrite + Unpin,
 {
@@ -344,18 +340,14 @@ pub fn parse_packet_frame(frame: &[u8]) -> Result<(SocketAddr, &[u8])> {
     let (addr_len, ip) = match atyp {
         ATYP_IPV4 => (
             4,
-            std::net::IpAddr::V4(Ipv4Addr::from([
-                body[1], body[2], body[3], body[4],
-            ])),
+            std::net::IpAddr::V4(Ipv4Addr::from([body[1], body[2], body[3], body[4]])),
         ),
         ATYP_IPV6 => {
             let mut b = [0u8; 16];
             b.copy_from_slice(&body[1..17]);
             (16, std::net::IpAddr::V6(Ipv6Addr::from(b)))
         }
-        _ => bail!(
-            "vless: packetaddr: ATYP {atyp:#x} 不支持（packetaddr 仅承载已解析的 IP 地址）"
-        ),
+        _ => bail!("vless: packetaddr: ATYP {atyp:#x} 不支持（packetaddr 仅承载已解析的 IP 地址）"),
     };
     let port_off = 1 + addr_len;
     if body.len() < port_off + 2 {
@@ -402,11 +394,7 @@ pub fn encode_packet_frame(src: SocketAddr, payload: &[u8]) -> Result<Vec<u8>> {
 const PACKETADDR_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const PACKETADDR_MAX_PACKET: usize = 65535;
 
-pub async fn packetaddr_relay<S>(
-    stream: S,
-    peer: SocketAddr,
-    bind_ip: OutboundBind,
-) -> Result<()>
+pub async fn packetaddr_relay<S>(stream: S, peer: SocketAddr, bind_ip: OutboundBind) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -486,4 +474,3 @@ async fn recv_one(sock: &UdpSocket) -> std::io::Result<(SocketAddr, Vec<u8>)> {
     buf.truncate(n);
     Ok((from, buf))
 }
-

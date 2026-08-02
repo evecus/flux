@@ -327,7 +327,15 @@ async fn handle_request(
     if is_downlink {
         handle_get(req, inner, session_id.as_deref(), peer, origin).await
     } else {
-        handle_post(req, inner, session_id.as_deref(), seq_str.as_deref(), peer, origin).await
+        handle_post(
+            req,
+            inner,
+            session_id.as_deref(),
+            seq_str.as_deref(),
+            peer,
+            origin,
+        )
+        .await
     }
 }
 
@@ -492,12 +500,7 @@ async fn handle_post(
                 Ok(c) => {
                     let bytes = c.to_bytes();
                     let had = !bytes.is_empty();
-                    let _ = up_tx
-                        .send(UploadPacket::Packet {
-                            seq,
-                            data: bytes,
-                        })
-                        .await;
+                    let _ = up_tx.send(UploadPacket::Packet { seq, data: bytes }).await;
                     had
                 }
                 Err(e) => {
@@ -518,7 +521,10 @@ async fn handle_post(
 /// 对齐 Xray `Config.WriteResponseHeader`（`splithttp/config.go`）：
 ///   - 无 Origin → `Access-Control-Allow-Origin: *`
 ///   - 有 Origin → 回写该 Origin（浏览器 credentials 模式必需）
-fn cors_origin_header(builder: http::response::Builder, origin: Option<&str>) -> http::response::Builder {
+fn cors_origin_header(
+    builder: http::response::Builder,
+    origin: Option<&str>,
+) -> http::response::Builder {
     match origin {
         Some(o) => builder
             .header("Access-Control-Allow-Origin", o)
@@ -541,7 +547,12 @@ fn downlink_response(
         .header("Cache-Control", "no-store")
         .header("X-Accel-Buffering", "no");
     let builder = cors_origin_header(builder, origin);
-    builder.body(ResponseBody::Stream { rx: down_rx, cleanup }).unwrap()
+    builder
+        .body(ResponseBody::Stream {
+            rx: down_rx,
+            cleanup,
+        })
+        .unwrap()
 }
 
 /// stream-up 响应：对齐 Xray hub.go，设置 X-Accel-Buffering / Cache-Control

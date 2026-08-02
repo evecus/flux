@@ -151,9 +151,10 @@ async fn handle(
     let mut io: Box<dyn AsyncReadWrite> = match (transport, tls_acceptor) {
         ("tcp", None) => Box::new(stream),
         ("tcp", Some(acc)) => Box::new(acc.accept(stream).await?),
-        ("ws", None) => {
-            Box::new(shared_ws::accept_plain(stream, &shared_ws::opts_from_transport(&cfg.transport)).await?)
-        }
+        ("ws", None) => Box::new(
+            shared_ws::accept_plain(stream, &shared_ws::opts_from_transport(&cfg.transport))
+                .await?,
+        ),
         ("ws", Some(acc)) => {
             let tls = acc.accept(stream).await?;
             Box::new(
@@ -388,9 +389,7 @@ async fn relay_udp<S: AsyncRead + AsyncWrite + Unpin + ?Sized>(
 /// 包格式：`[ATYP][addr][port][length(2 BE)][CRLF][payload]`
 ///
 /// 域名 ATYP (3) 通过 `tokio::net::lookup_host` 解析为 IP。
-async fn read_trojan_packet<R: AsyncRead + Unpin>(
-    r: &mut R,
-) -> Result<(SocketAddr, Vec<u8>)> {
+async fn read_trojan_packet<R: AsyncRead + Unpin>(r: &mut R) -> Result<(SocketAddr, Vec<u8>)> {
     let atyp = r.read_u8().await?;
     let host = match atyp {
         1 => {
@@ -430,7 +429,9 @@ async fn read_trojan_packet<R: AsyncRead + Unpin>(
 
     // 域名需要解析为 SocketAddr；IP 地址直接构造。
     let target: SocketAddr = if atyp == 1 || atyp == 4 {
-        target_str.parse().map_err(|e| anyhow::anyhow!("trojan udp: bad addr {target_str}: {e}"))?
+        target_str
+            .parse()
+            .map_err(|e| anyhow::anyhow!("trojan udp: bad addr {target_str}: {e}"))?
     } else {
         // 域名：lookup_host 可能返回多个地址，取第一个可用
         match tokio::net::lookup_host(&target_str).await?.next() {

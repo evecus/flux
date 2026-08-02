@@ -40,7 +40,7 @@ use crate::common::transport::websocket as shared_ws;
 use crate::common::transport::xhttp::{XhttpConfig, XhttpServer};
 use crate::config::VmessConfig;
 use crate::vless::protocol::{
-    encode_packet_frame, parse_packet_frame, parse_uuid, packetaddr_relay,
+    encode_packet_frame, packetaddr_relay, parse_packet_frame, parse_uuid,
 };
 
 // ── KDF salts (matching Xray consts) ─────────────────────────────────────────
@@ -181,7 +181,8 @@ async fn handle(
         ("tcp", None) => Box::new(stream),
         ("tcp", Some(a)) => Box::new(a.accept(stream).await?),
         ("ws", None) => Box::new(
-            shared_ws::accept_plain(stream, &shared_ws::opts_from_transport(&cfg.transport)).await?,
+            shared_ws::accept_plain(stream, &shared_ws::opts_from_transport(&cfg.transport))
+                .await?,
         ),
         ("ws", Some(a)) => {
             let t = a.accept(stream).await?;

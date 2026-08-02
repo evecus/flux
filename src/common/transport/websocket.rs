@@ -197,11 +197,7 @@ where
     .await?;
 
     // 取回 callback 中提取的 early data
-    let early_data = early_data_slot
-        .lock()
-        .unwrap()
-        .take()
-        .unwrap_or_default();
+    let early_data = early_data_slot.lock().unwrap().take().unwrap_or_default();
 
     Ok(WsStream::with_early_data(ws, early_data))
 }

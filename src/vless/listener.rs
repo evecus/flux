@@ -16,7 +16,9 @@ use crate::common::tls::standard as shared_tls;
 use crate::common::transport::websocket as shared_ws;
 use crate::common::transport::xhttp::{XhttpConfig, XhttpServer};
 use crate::config::{VlessConfig, VlessTlsConfig};
-use crate::vless::protocol::{decode_request, encode_response, parse_uuid, CMD_TCP, CMD_UDP, CMD_MUX, CMD_RVS};
+use crate::vless::protocol::{
+    decode_request, encode_response, parse_uuid, CMD_MUX, CMD_RVS, CMD_TCP, CMD_UDP,
+};
 use crate::vless::tls::reality as vless_reality;
 
 pub async fn run(cfg: Arc<VlessConfig>) -> Result<()> {
@@ -184,8 +186,9 @@ async fn handle_conn(
         // ── WS, no TLS ────────────────────────────────────────────────────
         ("ws", None) => {
             debug!("[vless] {peer} → WS");
-            let ws = shared_ws::accept_plain(stream, &shared_ws::opts_from_transport(&cfg.transport))
-                .await?;
+            let ws =
+                shared_ws::accept_plain(stream, &shared_ws::opts_from_transport(&cfg.transport))
+                    .await?;
             process_vless_stream(ws, peer, uuid_bytes, bind_ip).await
         }
         // ── WS + standard TLS ─────────────────────────────────────────────
@@ -206,9 +209,11 @@ async fn handle_conn(
         ("ws", Some(VlessTlsConfig::Reality(reality_cfg))) => {
             debug!("[vless] {peer} → WS+Reality");
             let reality_stream = vless_reality::accept(stream, peer, reality_cfg).await?;
-            let ws =
-                shared_ws::accept_tls(reality_stream, &shared_ws::opts_from_transport(&cfg.transport))
-                    .await?;
+            let ws = shared_ws::accept_tls(
+                reality_stream,
+                &shared_ws::opts_from_transport(&cfg.transport),
+            )
+            .await?;
             process_vless_stream(ws, peer, uuid_bytes, bind_ip).await
         }
         (other, _) => anyhow::bail!("vless: unknown transport type '{other}'"),
@@ -264,23 +269,20 @@ async fn relay_tcp<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let outbound = match shared_net::dial_tcp_timeout(
-        target,
-        bind_ip,
-        std::time::Duration::from_secs(10),
-    )
-    .await
-    {
-        Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
-            warn!("[vless] {peer} connect {target} timeout");
-            anyhow::bail!("connect timeout");
-        }
-        Err(e) => {
-            warn!("[vless] {peer} connect {target} failed: {e}");
-            return Err(e.into());
-        }
-    };
+    let outbound =
+        match shared_net::dial_tcp_timeout(target, bind_ip, std::time::Duration::from_secs(10))
+            .await
+        {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                warn!("[vless] {peer} connect {target} timeout");
+                anyhow::bail!("connect timeout");
+            }
+            Err(e) => {
+                warn!("[vless] {peer} connect {target} failed: {e}");
+                return Err(e.into());
+            }
+        };
 
     encode_response(&mut stream).await?;
 

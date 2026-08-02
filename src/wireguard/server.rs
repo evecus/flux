@@ -345,10 +345,7 @@ async fn find_peer(
         _ => {
             // Response/CookieReply/Transport：有 receiver 字段，
             // 但 endpoint 尚未记录时无法匹配。fallback 到第一个 peer。
-            peers
-                .iter()
-                .next()
-                .map(|(h, p)| (h.clone(), Arc::clone(p)))
+            peers.iter().next().map(|(h, p)| (h.clone(), Arc::clone(p)))
         }
     }
 }

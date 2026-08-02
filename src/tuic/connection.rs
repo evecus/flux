@@ -101,7 +101,12 @@ impl TuicFragBuffer {
 
     /// 插入一个分片。返回 Some(payload, addr) 表示全部分片已到齐并重组完成。
     /// 对齐 sing-quic udpDefragger.feed：重复 frag_id 不计数。
-    fn insert(&mut self, frag_id: u8, payload: Bytes, addr: Option<Address>) -> Option<(Bytes, Address)> {
+    fn insert(
+        &mut self,
+        frag_id: u8,
+        payload: Bytes,
+        addr: Option<Address>,
+    ) -> Option<(Bytes, Address)> {
         if frag_id >= self.frag_total {
             return None;
         }
@@ -121,7 +126,11 @@ impl TuicFragBuffer {
 
         if self.received >= self.frag_total {
             let addr = self.addr.clone()?;
-            let total_len: usize = self.frags.iter().filter_map(|f| f.as_ref().map(|b| b.len())).sum();
+            let total_len: usize = self
+                .frags
+                .iter()
+                .filter_map(|f| f.as_ref().map(|b| b.len()))
+                .sum();
             let mut buf = bytes::BytesMut::with_capacity(total_len);
             for b in self.frags.iter().flatten() {
                 buf.extend_from_slice(b);
