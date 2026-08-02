@@ -117,16 +117,18 @@ async fn handle(
     tls_acceptor: Option<Arc<TlsAcceptor>>,
 ) -> Result<()> {
     let transport = cfg.transport.r#type.as_str();
-    let ws_path = cfg.transport.ws_path.as_str();
-    let ws_host = cfg.transport.ws_host.as_deref();
 
     let mut io: Box<dyn AsyncReadWrite> = match (transport, tls_acceptor) {
         ("tcp", None) => Box::new(stream),
         ("tcp", Some(acc)) => Box::new(acc.accept(stream).await?),
-        ("ws", None) => Box::new(shared_ws::accept_plain(stream, ws_path, ws_host).await?),
+        ("ws", None) => {
+            Box::new(shared_ws::accept_plain(stream, &shared_ws::opts_from_transport(&cfg.transport)).await?)
+        }
         ("ws", Some(acc)) => {
             let tls = acc.accept(stream).await?;
-            Box::new(shared_ws::accept_tls(tls, ws_path, ws_host).await?)
+            Box::new(
+                shared_ws::accept_tls(tls, &shared_ws::opts_from_transport(&cfg.transport)).await?,
+            )
         }
         _ => bail!("trojan: unknown transport"),
     };
