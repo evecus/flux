@@ -13,9 +13,10 @@
 //!   terminate on size_field==16 and plaintext==empty (EOF chunk)
 //!
 //! ### Response header
-//!   responseBodyKey = SHA256(requestBodyKey)[:16]
-//!   responseBodyIV  = SHA256(requestBodyIV)[:16]
+//!   responseBodyKey = MD5(requestBodyKey)
+//!   responseBodyIV  = MD5(requestBodyIV)
 //!   payload = [V_byte, option, 0x00, 0x00]
+//!   KDF root = requestBodyKey / requestBodyIV (NOT responseBodyKey/IV)
 //!   write: AES-GCM(len) ++ AES-GCM(payload)   (same as request header format)
 //!
 //! ### Response body (same chunk format, but using responseBodyKey/IV)
@@ -27,7 +28,6 @@ use aes_gcm::{
     Aes128Gcm, Nonce,
 };
 use anyhow::{anyhow, bail, Context, Result};
-use sha2::{Digest, Sha256};
 use sha3::digest::{ExtendableOutput, Update, XofReader};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
@@ -181,18 +181,12 @@ async fn handle(
         ("tcp", None) => Box::new(stream),
         ("tcp", Some(a)) => Box::new(a.accept(stream).await?),
         ("ws", None) => Box::new(
-            shared_ws::accept_plain(
-                stream,
-                &cfg.transport.ws_path,
-                cfg.transport.ws_host.as_deref(),
-            )
-            .await?,
+            shared_ws::accept_plain(stream, &shared_ws::opts_from_transport(&cfg.transport)).await?,
         ),
         ("ws", Some(a)) => {
             let t = a.accept(stream).await?;
             Box::new(
-                shared_ws::accept_tls(t, &cfg.transport.ws_path, cfg.transport.ws_host.as_deref())
-                    .await?,
+                shared_ws::accept_tls(t, &shared_ws::opts_from_transport(&cfg.transport)).await?,
             )
         }
         _ => bail!("unknown transport"),
@@ -603,8 +597,12 @@ impl ChunkCodec {
     }
 
     /// 写一个 chunk。`plain` 为空时写 EOF chunk（仅 TCP downlink 在对端 EOF 时用）。
+    ///
+    /// 对齐 Xray chunk 编码顺序：当 OPT_AUTH_LEN 启用时，nonce 计数器顺序
+    /// 必须与 read_chunk 一致 —— 先加密 size(count=N)，再加密 payload(count=N+1)。
+    /// 之前错误地先加密 payload 再加密 size，导致 nonce 不匹配，客户端解密失败。
     async fn write_chunk<W: AsyncWrite + Unpin>(&mut self, w: &mut W, plain: &[u8]) -> Result<()> {
-        // Step 1: padding size FIRST（Shake128 顺序与 decode 一致）
+        // Step 1: padding size（Shake128 顺序与 decode 一致）
         let pad_len: usize = if self.use_padding {
             self.shake
                 .as_mut()
@@ -614,7 +612,34 @@ impl ChunkCodec {
             0
         };
 
-        // Step 2: encrypt
+        // Step 2: 预计算 ciphertext 长度（AEAD tag = 16 bytes）
+        let tag_len = match self.sec {
+            SEC_NONE => 0,
+            _ => 16,
+        };
+        let ct_len = plain.len() + tag_len;
+        let total_size = (ct_len + pad_len) as u16;
+
+        // Step 3: 加密并写入 size field
+        // 当 use_auth_len 时，使用 nonce(count=N)，然后 count += 1
+        // 这与 read_chunk 的顺序一致：size 先于 payload 使用 nonce
+        if self.use_auth_len {
+            let nonce = chunk_nonce(&self.iv, self.count);
+            self.count = self.count.wrapping_add(1);
+            let lc = Aes128Gcm::new_from_slice(self.auth_len_key.as_ref().unwrap())?;
+            let enc_len = lc
+                .encrypt(Nonce::from_slice(&nonce), total_size.to_be_bytes().as_ref())
+                .map_err(|_| anyhow!("len encrypt"))?;
+            w.write_all(&enc_len).await?;
+        } else if let Some(ref mut sk) = self.shake {
+            w.write_all(&(total_size ^ sk.next_u16()).to_be_bytes())
+                .await?;
+        } else {
+            w.write_all(&total_size.to_be_bytes()).await?;
+        }
+
+        // Step 4: 加密 payload
+        // use_auth_len: nonce(count=N+1); 非 auth_len: nonce(count=N)
         let ct: Vec<u8> = match self.sec {
             SEC_NONE => plain.to_vec(),
             SEC_AES128_GCM | SEC_AUTO => {
@@ -637,27 +662,10 @@ impl ChunkCodec {
         };
         self.count = self.count.wrapping_add(1);
 
-        // Step 3: size field = encrypted_len + pad_len (masked or plain)
-        let total_size = (ct.len() + pad_len) as u16;
-        if self.use_auth_len {
-            let nonce = chunk_nonce(&self.iv, self.count);
-            self.count = self.count.wrapping_add(1);
-            let lc = Aes128Gcm::new_from_slice(self.auth_len_key.as_ref().unwrap())?;
-            let enc_len = lc
-                .encrypt(Nonce::from_slice(&nonce), total_size.to_be_bytes().as_ref())
-                .map_err(|_| anyhow!("len encrypt"))?;
-            w.write_all(&enc_len).await?;
-        } else if let Some(ref mut sk) = self.shake {
-            w.write_all(&(total_size ^ sk.next_u16()).to_be_bytes())
-                .await?;
-        } else {
-            w.write_all(&total_size.to_be_bytes()).await?;
-        }
-
-        // Step 4: ciphertext
+        // Step 5: 写入 ciphertext
         w.write_all(&ct).await?;
 
-        // Step 5: random padding
+        // Step 6: 写入随机 padding
         if pad_len > 0 {
             let mut pad = vec![0u8; pad_len];
             rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut pad);
@@ -811,8 +819,8 @@ fn parse_plain_header(h: &[u8]) -> Result<VmessRequest> {
         bail!("fnv mismatch");
     }
 
-    let response_body_key = sha256_16(&req_key);
-    let response_body_iv = sha256_16(&req_iv);
+    let response_body_key = md5_16(&req_key);
+    let response_body_iv = md5_16(&req_iv);
 
     Ok(VmessRequest {
         target: format!("{host}:{port}"),
@@ -831,8 +839,13 @@ async fn encode_response_header<S: AsyncWrite + Unpin + ?Sized>(
     s: &mut S,
     req: &VmessRequest,
 ) -> Result<()> {
-    let rk = &req.response_body_key;
-    let ri = &req.response_body_iv;
+    // 对齐 Xray/v2ray VMess AEAD 规范：响应头 AEAD 密钥派生使用
+    // requestBodyKey / requestBodyIV（而非 responseBodyKey / responseBodyIV）。
+    // 客户端持有 requestBodyKey/IV（它在请求头里发送的），用它派生出
+    // 相同的响应头解密密钥；如果服务端用 responseBodyKey(=MD5(requestBodyKey))
+    // 做派生根，客户端将无法解密响应头。
+    let rk = &req.request_body_key;
+    let ri = &req.request_body_iv;
     let payload = [req.response_token, req.option, 0x00, 0x00];
 
     let len_key = kdf16(rk, &[KDF_RESP_LEN_KEY]);
@@ -954,8 +967,9 @@ fn aead_seal(pt: &[u8], key: &[u8; 16], nonce: &[u8; 12], aad: &[u8]) -> Result<
         .map_err(|_| anyhow!("aead encrypt"))
 }
 
-fn sha256_16(b: &[u8; 16]) -> [u8; 16] {
-    Sha256::digest(b)[..16].try_into().unwrap()
+fn md5_16(b: &[u8; 16]) -> [u8; 16] {
+    use md5::{Digest as _, Md5};
+    Md5::digest(b).into()
 }
 
 fn fnv1a32(data: &[u8]) -> u32 {
