@@ -183,6 +183,18 @@ fn verify_reality_client(record: &[u8], cfg: &RealityConfig) -> Result<[u8; 32]>
         );
     }
 
+    // ── SNI 校验（对齐 sing-box: config.ServerNames[serverName] 必须为 true）──
+    //
+    // sing-box 在 tls.go:168 检查 SNI，Flux 原先完全跳过此项。
+    // 攻击者可以用错误的 SNI 连接，存在安全风险。
+    let client_sni = extract_sni_from_client_hello(record).unwrap_or_default();
+    if !client_sni.is_empty() && client_sni != cfg.server_name {
+        bail!(
+            "SNI 不匹配: client='{client_sni}' expected='{}'",
+            cfg.server_name
+        );
+    }
+
     let random = &record[RANDOM_OFFSET..RANDOM_OFFSET + RANDOM_LEN];
     let session_id = &record[SID_OFFSET..SID_OFFSET + 32];
 
@@ -202,7 +214,7 @@ fn verify_reality_client(record: &[u8], cfg: &RealityConfig) -> Result<[u8; 32]>
     let nonce_bytes = &random[20..32];
     let use_aes = cipher_suite_prefers_aes(record);
 
-    // ── 关键修复：构造与 Xray 完全一致的 AAD ──────────────────────────────
+    // ── 构造与 Xray 完全一致的 AAD ──────────────────────────────────────────
     //
     // Xray（tls.go）的 aead.Open 调用：
     //   aead.Open(plainText[:0], hs.clientHello.random[20:], ciphertext, hs.clientHello.original)
@@ -211,18 +223,8 @@ fn verify_reality_client(record: &[u8], cfg: &RealityConfig) -> Result<[u8; 32]>
     // 即 record[RECORD_HDR..]（不含 5 字节 TLS record 头），
     // 并且在调用前已将 sessionId 字段清零：
     //   copy(hs.clientHello.sessionId, plainText)  // plainText 是全零切片
-    //
-    // flux 原代码的两个 AAD 错误：
-    //   1. 用了 record（含 5 字节 TLS record header），Xray 用的是 record[5..]
-    //   2. AAD 中 session_id 字段没有清零，Xray 在解密前先把它清零
-    //
-    // 修复：把 record[RECORD_HDR..] 复制出来，将 session_id 部分清零，作为 AAD。
-    // 去掉 5 字节 TLS record 头
     let mut aad = record[RECORD_HDR..].to_vec();
-    // session_id 在 aad 中的偏移 = 原 SID_OFFSET - RECORD_HDR
-    // = HANDSHAKE_HDR + LEGACY_VER_LEN + RANDOM_LEN + 1 = 39
     let aad_sid_start = SID_OFFSET - RECORD_HDR;
-    // 将 session_id 清零
     aad[aad_sid_start..aad_sid_start + 32].fill(0);
 
     let plaintext = if use_aes {
@@ -252,6 +254,36 @@ fn verify_reality_client(record: &[u8], cfg: &RealityConfig) -> Result<[u8; 32]>
             )
             .map_err(|_| anyhow::anyhow!("ChaCha20-Poly1305 解密失败，非 Reality 客户端"))?
     };
+
+    // ── 时间戳校验（对齐 sing-box: |time.Since(ClientTime)| <= MaxTimeDiff）──
+    //
+    // 明文布局（16 字节）：
+    //   [0:3]  ClientVer (3 bytes, big-endian version)
+    //   [3]    padding (unused)
+    //   [4:8]  ClientTime (uint32 big-endian Unix timestamp)
+    //   [8:16] ClientShortId (8 bytes)
+    //
+    // sing-box 在 tls.go:202-207 检查时间偏差。Flux 原先完全跳过此项，
+    // 存在重放攻击风险——攻击者可记录并重放认证包。
+    if cfg.max_time_diff > 0 && plaintext.len() >= 8 {
+        let client_time = u32::from_be_bytes([
+            plaintext[4],
+            plaintext[5],
+            plaintext[6],
+            plaintext[7],
+        ]) as i64;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let diff = (now - client_time).abs();
+        if diff > cfg.max_time_diff as i64 {
+            bail!(
+                "时间偏差 {diff}s 超过 max_time_diff {}s，可能为重放攻击",
+                cfg.max_time_diff
+            );
+        }
+    }
 
     for sid_hex in &cfg.short_ids {
         let sid_bytes =
@@ -541,6 +573,59 @@ fn cipher_suite_prefers_aes(record: &[u8]) -> bool {
 }
 
 // ── KeyShare 提取 ─────────────────────────────────────────────────────────────
+
+/// 从 ClientHello 中提取 SNI（Server Name Indication）。
+///
+/// SNI 扩展类型 = 0x0000，格式：
+///   [2B server_name_list_len]
+///   [1B name_type (0=host_name)]
+///   [2B host_name_len]
+///   [N  host_name]
+fn extract_sni_from_client_hello(record: &[u8]) -> Result<String> {
+    // 跳过 cipher_suites 和 compression_methods，定位到 extensions
+    let mut pos = SID_OFFSET + 32;
+    if pos + 2 > record.len() {
+        bail!("record 在 cipher_suites 前截断");
+    }
+    let cs_len = u16::from_be_bytes([record[pos], record[pos + 1]]) as usize;
+    pos += 2 + cs_len;
+
+    if pos + 1 > record.len() {
+        bail!("record 在 compression_methods 前截断");
+    }
+    let cm_len = record[pos] as usize;
+    pos += 1 + cm_len;
+
+    if pos + 2 > record.len() {
+        bail!("record 在 extensions_length 前截断");
+    }
+    let ext_total = u16::from_be_bytes([record[pos], record[pos + 1]]) as usize;
+    pos += 2;
+    let ext_end = pos + ext_total;
+    if ext_end > record.len() {
+        bail!("extensions 超出 record 边界");
+    }
+
+    while pos + 4 <= ext_end {
+        let ext_type = u16::from_be_bytes([record[pos], record[pos + 1]]);
+        let ext_len = u16::from_be_bytes([record[pos + 2], record[pos + 3]]) as usize;
+        pos += 4;
+        if pos + ext_len > ext_end {
+            bail!("extension 数据超出边界");
+        }
+        // SNI extension = 0x0000
+        if ext_type == 0x0000 && ext_len >= 5 {
+            let ext_data = &record[pos..pos + ext_len];
+            // [2B list_len][1B name_type][2B name_len][N name]
+            let name_len = u16::from_be_bytes([ext_data[3], ext_data[4]]) as usize;
+            if 5 + name_len <= ext_data.len() {
+                return Ok(String::from_utf8_lossy(&ext_data[5..5 + name_len]).to_string());
+            }
+        }
+        pos += ext_len;
+    }
+    bail!("未找到 SNI 扩展（0x0000）")
+}
 
 fn extract_x25519_from_key_share(record: &[u8]) -> Result<[u8; 32]> {
     let mut pos = SID_OFFSET + 32;
