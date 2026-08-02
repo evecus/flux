@@ -18,9 +18,12 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const UDP_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const UDP_MAX_PKT: usize = 65507;
 
-// Hysteria2 QUIC datagram 的安全最大载荷（QUIC MTU 1200 - 帧头余量）
-// 超过此大小的 UDP 回包需要分片发送
-const DATAGRAM_MAX_PAYLOAD: usize = 1100;
+// Hysteria2 QUIC datagram 的安全最大载荷。
+// 对齐 sing-quic hysteria2 udpPacketConn.udpMTU = 1200 - 3 = 1197：
+//   1200 = QUIC 最小 MTU（RFC 9000），3 = QUIC datagram frame 头部开销。
+// 超过此大小的 UDP 回包需要分片发送。
+// 原值为 1100，过于保守，浪费带宽。
+const DATAGRAM_MAX_PAYLOAD: usize = 1197;
 
 // ── TCP proxy ─────────────────────────────────────────────────────────────────
 
@@ -264,8 +267,16 @@ impl FragBuffer {
     }
 
     fn insert(&mut self, frag_id: u8, payload: Bytes) -> Option<(Bytes, String, u16)> {
-        self.frags.entry(frag_id).or_insert(payload);
-        self.received += 1;
+        // 对齐 sing-box udpDefragger.feed：仅在新 frag_id 时递增计数，
+        // 重复分片不计数（or_insert 已保证幂等），避免 received 提前达到 total
+        // 导致错误重组。
+        let is_new = self
+            .frags
+            .insert(frag_id, payload)
+            .is_none();
+        if is_new {
+            self.received += 1;
+        }
 
         if self.received >= self.total {
             let mut ids: Vec<u8> = self.frags.keys().cloned().collect();
