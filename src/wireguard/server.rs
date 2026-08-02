@@ -205,8 +205,43 @@ pub async fn run(cfg: Arc<WireGuardConfig>) -> Result<()> {
         let (pub_hex, peer) = match find_peer(&peer_map, raw, src).await {
             Some(v) => v,
             None => {
-                debug!("[wireguard] unknown src {src}, dropping");
-                continue;
+                // 多 peer 场景：initiation 消息无 receiver 字段，
+                // 遍历所有 peer 尝试 decapsulate，直到某个 peer 成功。
+                if raw.len() >= 4 && u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]) == 1 {
+                    let mut found = None;
+                    for (hex, p) in peer_map.iter() {
+                        let mut tun = p.tunnel.lock().await;
+                        let r = tun.decapsulate(Some(src.ip()), raw, &mut dec_buf);
+                        match r {
+                            TunnResult::WriteToNetwork(pkt) => {
+                                // 成功解密 initiation，发送响应
+                                let _ = socket.send_to(pkt, src).await;
+                                *p.endpoint.lock().await = Some(src);
+                                *p.last_seen.lock().await = Instant::now();
+                                found = Some((hex.clone(), Arc::clone(p)));
+                                break;
+                            }
+                            TunnResult::Done => {
+                                // 可能也需要更新 endpoint
+                                *p.endpoint.lock().await = Some(src);
+                                *p.last_seen.lock().await = Instant::now();
+                                found = Some((hex.clone(), Arc::clone(p)));
+                                break;
+                            }
+                            _ => continue, // 此 peer 不匹配，尝试下一个
+                        }
+                    }
+                    match found {
+                        Some(v) => v,
+                        None => {
+                            debug!("[wireguard] initiation from {src} matched no peer, dropping");
+                            continue;
+                        }
+                    }
+                } else {
+                    debug!("[wireguard] unknown src {src}, dropping");
+                    continue;
+                }
             }
         };
 
@@ -240,9 +275,13 @@ pub async fn run(cfg: Arc<WireGuardConfig>) -> Result<()> {
         drain_timers(&peer, &socket, src, &mut dec_buf).await;
 
         // 5. 处理解密结果。
-        let Some(ip_pkt) = ip_owned else { continue };
+        let Some(mut ip_pkt) = ip_owned else { continue };
 
-        // 6. AllowedIPs 检查。
+        // 6. IP 包长度校验 + 截断（对齐 sing-box receive.go），再 AllowedIPs 检查。
+        if !validate_and_truncate_ip_packet(&mut ip_pkt) {
+            debug!("[wireguard] invalid IP packet (bad length or version), dropping");
+            continue;
+        }
         if !peer.allows(packet_src_ip(&ip_pkt)) {
             debug!("[wireguard] src IP not in AllowedIPs, dropping");
             continue;
@@ -257,24 +296,61 @@ pub async fn run(cfg: Arc<WireGuardConfig>) -> Result<()> {
 
 // ── 辅助函数 ──────────────────────────────────────────────────────────────────
 
-/// 根据外部 UDP 源地址找到对应 peer。
+/// 根据外部 UDP 源地址和 WireGuard 消息类型找到对应 peer。
 ///
 /// 快路径：peer 的 endpoint 已记录且匹配 `src`。
-/// 慢路径（首次握手）：取第一个 peer（单 peer 场景下正确；
-///   多 peer 场景下 WireGuard 握手包含 receiver index，
-///   未来可解析 msg type=1/2 做精确匹配）。
+/// 慢路径（首次握手 initiation）：遍历所有 peer 尝试 decapsulate，
+///   直到某个 peer 成功解密 initiation（对齐 sing-box noise-protocol.go
+///   的 LookupPeer 逻辑——通过解密出的对方静态公钥查 peer）。
+///
+/// WireGuard 消息类型（小端 uint32，前 4 字节）：
+///   1 = Initiation（无 receiver 字段，需遍历尝试）
+///   2 = Response（有 receiver，但首次响应时 endpoint 尚未记录）
+///   3 = CookieReply（有 receiver）
+///   4 = Transport（有 receiver，endpoint 应已记录）
 async fn find_peer(
     peers: &HashMap<String, Arc<Peer>>,
-    _raw: &[u8],
+    raw: &[u8],
     src: SocketAddr,
 ) -> Option<(String, Arc<Peer>)> {
+    // 快路径：endpoint 已记录且匹配
     for (hex, peer) in peers {
         if *peer.endpoint.lock().await == Some(src) {
             return Some((hex.clone(), Arc::clone(peer)));
         }
     }
-    // 首次握手：fallback 到第一个 peer。
-    peers.iter().next().map(|(h, p)| (h.clone(), Arc::clone(p)))
+
+    // 慢路径：解析消息类型
+    if raw.len() < 4 {
+        return None;
+    }
+    let msg_type = u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
+
+    match msg_type {
+        1 => {
+            // Initiation：需要遍历所有 peer 尝试解密。
+            // 但 boringtun decapsulate 会修改 Tunn 状态，所以这里只做
+            // 预判——对 initiation，返回第一个未使用的 peer。
+            // 实际的 peer 匹配在 decapsulate 返回 WriteToNetwork（响应）时确认。
+            //
+            // 对于多 peer 场景，更精确的做法是解析 initiation 中的加密 static
+            // 字段，但需要 DH 计算才能解密，代价较大。
+            // boringtun 的 Tunn::decapsulate 对不匹配的 initiation 会返回 Err，
+            // 所以下面的主循环会遍历 peer 直到成功。
+            //
+            // 但当前架构下，find_peer 必须先选定一个 peer 才能 decapsulate。
+            // 多 peer 时，主循环应遍历尝试。这里返回 None 触发主循环的遍历逻辑。
+            None
+        }
+        _ => {
+            // Response/CookieReply/Transport：有 receiver 字段，
+            // 但 endpoint 尚未记录时无法匹配。fallback 到第一个 peer。
+            peers
+                .iter()
+                .next()
+                .map(|(h, p)| (h.clone(), Arc::clone(p)))
+        }
+    }
 }
 
 /// 排空 boringtun 定时器产生的出站包（keepalive、重握手等）。
@@ -298,6 +374,43 @@ fn packet_src_ip(pkt: &[u8]) -> IpAddr {
         Some(4) if pkt.len() >= 20 => IpAddr::V4(Ipv4Addr::new(pkt[12], pkt[13], pkt[14], pkt[15])),
         Some(6) if pkt.len() >= 40 => IpAddr::V6(ipv6_from_slice(&pkt[8..24])),
         _ => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+    }
+}
+
+/// 校验 IP 包长度并截断到实际长度（对齐 sing-box receive.go）。
+///
+/// sing-box 在 receive.go 中对解密后的明文 IP 包做严格校验：
+/// - IPv4: len >= 20, totalLen = BE(pkt[2:4]), 20 <= totalLen <= len
+/// - IPv6: len >= 40, payloadLen = BE(pkt[4:6]) + 40, payloadLen <= len
+///
+/// 校验通过后截断到 totalLen/payloadLen，丢弃尾部填充。
+/// 返回 false 表示包无效，应丢弃。
+fn validate_and_truncate_ip_packet(pkt: &mut Vec<u8>) -> bool {
+    match pkt.first().map(|b| b >> 4) {
+        Some(4) => {
+            if pkt.len() < 20 {
+                return false;
+            }
+            let total_len = u16::from_be_bytes([pkt[2], pkt[3]]) as usize;
+            if total_len < 20 || total_len > pkt.len() {
+                return false;
+            }
+            pkt.truncate(total_len);
+            true
+        }
+        Some(6) => {
+            if pkt.len() < 40 {
+                return false;
+            }
+            let payload_len = u16::from_be_bytes([pkt[4], pkt[5]]) as usize;
+            let expected = payload_len + 40;
+            if expected > pkt.len() {
+                return false;
+            }
+            pkt.truncate(expected);
+            true
+        }
+        _ => false,
     }
 }
 
