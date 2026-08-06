@@ -84,7 +84,7 @@ jobs:
 
       - name: Build (cross)
         if: matrix.cross
-        run: cross build --release --target ${{ matrix.target }} --features jemalloc
+        run: cross build --release --target ${{ matrix.target }}
 
       - name: Rename
         run: |
