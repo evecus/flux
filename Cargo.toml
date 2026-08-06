@@ -9,7 +9,11 @@ license = "MIT"
 name = "flux"
 path = "src/main.rs"
 
+[features]
+jemalloc = ["dep:tikv-jemallocator"]
+
 [dependencies]
+tikv-jemallocator = { version = "0.6", optional = true }
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec"] }
