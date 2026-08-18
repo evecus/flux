@@ -10,7 +10,6 @@
 
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::time::Duration;
 
 use tokio::net::{TcpSocket, TcpStream, UdpSocket};
 use tracing::info;
@@ -149,20 +148,4 @@ pub async fn bind_udp(bind: OutboundBind, v6: bool) -> io::Result<UdpSocket> {
             e
         }
     })
-}
-
-/// 带超时的 TCP 拨号封装，返回值与 `dial_tcp` 一致，超时时返回
-/// `io::ErrorKind::TimedOut`。
-pub async fn dial_tcp_timeout(
-    target: &str,
-    bind: OutboundBind,
-    timeout: Duration,
-) -> io::Result<TcpStream> {
-    match tokio::time::timeout(timeout, dial_tcp(target, bind)).await {
-        Ok(res) => res,
-        Err(_) => Err(io::Error::new(
-            io::ErrorKind::TimedOut,
-            format!("connect {target} timeout"),
-        )),
-    }
 }

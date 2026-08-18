@@ -133,10 +133,10 @@ async fn socks5_connect(cfg: &Socks5Config, target: &str) -> io::Result<TcpStrea
 
     match result {
         Ok(Ok(stream)) => Ok(stream.into_inner()),
-        Ok(Err(e)) => Err(io::Error::new(
-            io::ErrorKind::Other,
-            format!("上游 socks5({}) CONNECT {target} 失败: {e}", cfg.addr),
-        )),
+        Ok(Err(e)) => Err(io::Error::other(format!(
+            "上游 socks5({}) CONNECT {target} 失败: {e}",
+            cfg.addr
+        ))),
         Err(_) => Err(io::Error::new(
             io::ErrorKind::TimedOut,
             format!("上游 socks5({}) CONNECT {target} 超时", cfg.addr),
@@ -377,10 +377,9 @@ async fn read_socks5_reply_addr(stream: &mut TcpStream) -> io::Result<SocketAddr
         ));
     }
     if rep != 0x00 {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            format!("socks5 server rejected request, REP=0x{rep:02x}"),
-        ));
+        return Err(io::Error::other(format!(
+            "socks5 server rejected request, REP=0x{rep:02x}"
+        )));
     }
 
     let ip = match atyp {
