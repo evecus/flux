@@ -89,6 +89,12 @@ level = "info"
 # # url          = "https://example.com"
 # # rewrite_host = true
 
+#[node.outbound]
+#type     = "socks5"
+#addr     = "127.0.0.1:1080"
+#username = "user"
+#password = "pass"
+
 # ── 1-B: Hysteria2 + 自签名证书 ──────────────────────────────────────────────
 # [[node]]
 # tag    = "hy2-selfsigned"
