@@ -1,0 +1,914 @@
+use std::{
+    collections::HashMap,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket as StdUdpSocket},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
+
+use bytes::Bytes;
+use quinn::{Connection as QuinnConnection, RecvStream, SendStream};
+use socket2::{Domain, Protocol, SockAddr, Socket, Type};
+use tokio::{
+    net::{self, TcpStream, UdpSocket},
+    sync::{oneshot, Notify, RwLock as AsyncRwLock},
+    time,
+};
+use tracing::{debug, info, warn};
+use uuid::Uuid;
+
+use crate::{
+    config::TuicConfig,
+    tuic::{
+        error::Error,
+        proto::{build_packet_header, Address, Command, PacketInfo, CMD_HEARTBEAT, VERSION},
+    },
+};
+
+// ── Authentication state ──────────────────────────────────────────────────────
+
+#[derive(Clone)]
+pub struct Authenticated(Arc<AuthInner>);
+
+struct AuthInner {
+    uuid: std::sync::RwLock<Option<Uuid>>,
+    notify: Notify,
+    is_authenticated: AtomicBool,
+}
+
+impl Authenticated {
+    pub fn new() -> Self {
+        Self(Arc::new(AuthInner {
+            uuid: std::sync::RwLock::new(None),
+            notify: Notify::new(),
+            is_authenticated: AtomicBool::new(false),
+        }))
+    }
+
+    pub fn set(&self, uuid: Uuid) {
+        *self.0.uuid.write().unwrap() = Some(uuid);
+        self.0.is_authenticated.store(true, Ordering::SeqCst);
+        self.0.notify.notify_waiters();
+    }
+
+    #[allow(dead_code)]
+    pub fn get(&self) -> Option<Uuid> {
+        *self.0.uuid.read().unwrap()
+    }
+
+    pub fn is_authenticated(&self) -> bool {
+        self.0.is_authenticated.load(Ordering::SeqCst)
+    }
+
+    pub async fn wait(&self) {
+        if self.is_authenticated() {
+            return;
+        }
+        let notified = self.0.notify.notified();
+        if self.is_authenticated() {
+            return;
+        }
+        notified.await;
+    }
+}
+
+// ── UDP session ───────────────────────────────────────────────────────────────
+
+/// UDP 分片重组缓冲区。
+///
+/// 对齐 sing-quic tuic.udpDefragger：TUIC 协议中，当 UDP 包超过 QUIC datagram
+/// MTU 时，客户端将其拆分为多个分片。只有 frag_id=0 携带目标地址，其余分片
+/// 的地址为空（Address::None）。服务端需收集全部分片后按 frag_id 顺序拼接。
+struct TuicFragBuffer {
+    frag_total: u8,
+    frags: Vec<Option<Bytes>>,
+    received: u8,
+    /// 来自 frag_id=0 的目标地址（其余分片地址为 None）
+    addr: Option<Address>,
+}
+
+impl TuicFragBuffer {
+    fn new(frag_total: u8, addr: Option<Address>) -> Self {
+        Self {
+            frag_total,
+            frags: vec![None; frag_total as usize],
+            received: 0,
+            addr,
+        }
+    }
+
+    /// 插入一个分片。返回 Some(payload, addr) 表示全部分片已到齐并重组完成。
+    /// 对齐 sing-quic udpDefragger.feed：重复 frag_id 不计数。
+    fn insert(
+        &mut self,
+        frag_id: u8,
+        payload: Bytes,
+        addr: Option<Address>,
+    ) -> Option<(Bytes, Address)> {
+        if frag_id >= self.frag_total {
+            return None;
+        }
+        let slot = &mut self.frags[frag_id as usize];
+        if slot.is_some() {
+            return None; // 重复分片，忽略
+        }
+        *slot = Some(payload);
+        self.received += 1;
+
+        // frag_id=0 携带目标地址
+        if frag_id == 0 {
+            if let Some(a) = addr {
+                self.addr = Some(a);
+            }
+        }
+
+        if self.received >= self.frag_total {
+            let addr = self.addr.clone()?;
+            let total_len: usize = self
+                .frags
+                .iter()
+                .filter_map(|f| f.as_ref().map(|b| b.len()))
+                .sum();
+            let mut buf = bytes::BytesMut::with_capacity(total_len);
+            for b in self.frags.iter().flatten() {
+                buf.extend_from_slice(b);
+            }
+            Some((buf.freeze(), addr))
+        } else {
+            None
+        }
+    }
+}
+
+pub struct UdpSession {
+    assoc_id: u16,
+    udp: TuicUdpPair,
+    close_tx: AsyncRwLock<Option<oneshot::Sender<()>>>,
+    /// 分片重组表：packet_id → FragBuffer
+    defragger: tokio::sync::Mutex<HashMap<u16, TuicFragBuffer>>,
+}
+
+/// 出站 UDP 通道：直连（v4 + 可选 v6 socket，socket2 直接构造以支持
+/// `outbound_bind_ipv4/ipv6`）或链式 SOCKS5（单条 UDP ASSOCIATE 通道）。
+enum TuicUdpPair {
+    Direct {
+        v4: UdpSocket,
+        v6: Option<UdpSocket>,
+    },
+    Socks5(crate::common::outbound::UdpRelay),
+}
+
+impl TuicUdpPair {
+    async fn bind(
+        outbound: &crate::common::outbound::Outbound,
+        cfg: &TuicConfig,
+        udp_relay_ipv6: bool,
+    ) -> std::io::Result<Self> {
+        use crate::common::outbound::Outbound;
+        match outbound {
+            Outbound::Direct(_) => {
+                let socket_v4 = {
+                    let bind_addr_v4 = cfg.outbound_bind_ipv4.unwrap_or(Ipv4Addr::UNSPECIFIED);
+                    let s = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+                    s.set_nonblocking(true)?;
+                    s.bind(&SockAddr::from(SocketAddr::from((bind_addr_v4, 0))))?;
+                    UdpSocket::from_std(StdUdpSocket::from(s))?
+                };
+
+                let socket_v6 = if udp_relay_ipv6 {
+                    let bind_addr_v6 = cfg.outbound_bind_ipv6.unwrap_or(Ipv6Addr::UNSPECIFIED);
+                    let s = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP))?;
+                    s.set_nonblocking(true)?;
+                    s.set_only_v6(true)?;
+                    s.bind(&SockAddr::from(SocketAddr::from((bind_addr_v6, 0))))?;
+                    Some(UdpSocket::from_std(StdUdpSocket::from(s))?)
+                } else {
+                    None
+                };
+
+                Ok(TuicUdpPair::Direct {
+                    v4: socket_v4,
+                    v6: socket_v6,
+                })
+            }
+            Outbound::Socks5(_) => {
+                // 单条 UDP ASSOCIATE 通道同时承载 v4/v6 目标，忽略 udp_relay_ipv6。
+                let relay = crate::common::outbound::UdpRelay::bind(outbound, false).await?;
+                Ok(TuicUdpPair::Socks5(relay))
+            }
+        }
+    }
+
+    async fn send_to(&self, pkt: &[u8], addr: SocketAddr) -> std::io::Result<()> {
+        match self {
+            TuicUdpPair::Direct { v4, v6 } => {
+                let socket = match addr {
+                    SocketAddr::V4(_) => v4,
+                    SocketAddr::V6(_) => v6.as_ref().ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::Unsupported,
+                            "IPv6 UDP relay disabled",
+                        )
+                    })?,
+                };
+                socket.send_to(pkt, addr).await?;
+                Ok(())
+            }
+            TuicUdpPair::Socks5(relay) => relay.send_to_addr(pkt, addr).await,
+        }
+    }
+
+    async fn recv_from(&self, buf: &mut [u8]) -> std::io::Result<(usize, SocketAddr)> {
+        match self {
+            TuicUdpPair::Direct { v4, v6 } => {
+                if let Some(v6) = v6 {
+                    tokio::select! {
+                        r = v4.recv_from(buf) => r,
+                        r = v6.recv_from(buf) => r,
+                    }
+                } else {
+                    v4.recv_from(buf).await
+                }
+            }
+            TuicUdpPair::Socks5(relay) => relay.recv_from(buf).await,
+        }
+    }
+}
+
+impl UdpSession {
+    pub async fn new(
+        conn: Connection,
+        assoc_id: u16,
+        udp_relay_ipv6: bool,
+        stream_timeout: Duration,
+        max_pkt_size: usize,
+    ) -> std::io::Result<Arc<Self>> {
+        let outbound_cfg = crate::common::outbound::Outbound::new(
+            conn.cfg.outbound_bind_ipv4,
+            conn.cfg.outbound_bind_ipv6,
+            &conn.cfg.outbound,
+        );
+        let udp = TuicUdpPair::bind(&outbound_cfg, &conn.cfg, udp_relay_ipv6).await?;
+
+        let (tx, rx) = oneshot::channel::<()>();
+
+        let session = Arc::new(Self {
+            assoc_id,
+            udp,
+            close_tx: AsyncRwLock::new(Some(tx)),
+            defragger: tokio::sync::Mutex::new(HashMap::new()),
+        });
+
+        let session_listen = session.clone();
+        tokio::spawn(async move {
+            let mut rx = rx;
+            let mut timeout = tokio::time::interval(stream_timeout);
+            timeout.reset();
+            loop {
+                tokio::select! {
+                    result = session_listen.recv(max_pkt_size) => {
+                        timeout.reset();
+                        match result {
+                            Ok((pkt, addr)) => {
+                                let addr_tuic = Address::SocketAddress(addr);
+                                let hdr = build_packet_header(
+                                    session_listen.assoc_id,
+                                    rand::random::<u16>(),
+                                    &addr_tuic,
+                                    pkt.len() as u16,
+                                );
+                                // relay back via conn
+                                let conn = conn.clone();
+                                let pkt_clone = pkt.clone();
+                                tokio::spawn(async move {
+                                    conn.relay_udp_to_client(hdr, pkt_clone).await;
+                                });
+                            }
+                            Err(e) => {
+                                warn!("[TUIC][UDP][{:#06x}] recv error: {e}", session_listen.assoc_id);
+                            }
+                        }
+                    }
+                    _ = timeout.tick() => {
+                        warn!("[TUIC][UDP][{:#06x}] session timeout", session_listen.assoc_id);
+                        break;
+                    }
+                    _ = &mut rx => break,
+                }
+            }
+        });
+
+        Ok(session)
+    }
+
+    pub async fn send(&self, pkt: Bytes, addr: SocketAddr) -> std::io::Result<()> {
+        let mut addr = addr;
+        if let SocketAddr::V6(v6) = addr {
+            if let Some(v4) = v6.ip().to_ipv4_mapped() {
+                addr = SocketAddr::new(IpAddr::V4(v4), v6.port());
+            }
+        }
+        self.udp.send_to(&pkt, addr).await
+    }
+
+    async fn recv(&self, max_pkt_size: usize) -> std::io::Result<(Bytes, SocketAddr)> {
+        let mut buf = vec![0u8; max_pkt_size];
+        let (n, mut addr) = self.udp.recv_from(&mut buf).await?;
+        if let SocketAddr::V6(v6) = addr {
+            if let Some(v4) = v6.ip().to_ipv4_mapped() {
+                addr = SocketAddr::new(IpAddr::V4(v4), v6.port());
+            }
+        }
+        buf.truncate(n);
+        Ok((Bytes::from(buf), addr))
+    }
+
+    pub async fn close(&self) {
+        if let Some(tx) = self.close_tx.write().await.take() {
+            let _ = tx.send(());
+        }
+    }
+}
+
+// ── Connection ────────────────────────────────────────────────────────────────
+
+#[derive(Clone)]
+pub struct Connection {
+    inner: QuinnConnection,
+    auth: Authenticated,
+    users: Arc<HashMap<Uuid, String>>,
+    cfg: Arc<TuicConfig>,
+    udp_sessions: Arc<tokio::sync::Mutex<HashMap<u16, Arc<UdpSession>>>>,
+    udp_mode: Arc<std::sync::Mutex<Option<UdpMode>>>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum UdpMode {
+    Quic,
+    Native,
+}
+
+impl std::fmt::Display for UdpMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UdpMode::Quic => write!(f, "quic"),
+            UdpMode::Native => write!(f, "native"),
+        }
+    }
+}
+
+impl Connection {
+    pub fn new(
+        inner: QuinnConnection,
+        users: Arc<HashMap<Uuid, String>>,
+        cfg: Arc<TuicConfig>,
+    ) -> Self {
+        Self {
+            inner,
+            auth: Authenticated::new(),
+            users,
+            cfg,
+            udp_sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            udp_mode: Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+
+    /// Main entry: handle a newly accepted QUIC connection
+    pub async fn handle(self) {
+        let peer = self.inner.remote_address();
+        info!("[TUIC] connection from {peer}");
+
+        // Spawn authentication timeout watchdog
+        let conn_wdog = self.clone();
+        let auth_timeout = self.cfg.auth_timeout;
+        tokio::spawn(async move {
+            time::sleep(auth_timeout).await;
+            if !conn_wdog.auth.is_authenticated() {
+                warn!("[TUIC] {peer} authentication timeout, closing");
+                conn_wdog
+                    .inner
+                    .close(quinn::VarInt::from_u32(0), b"auth timeout");
+            }
+        });
+
+        // 对齐 sing-box tuic.loopHeartbeats：服务端定期向客户端发送 TUIC
+        // Heartbeat datagram（[VERSION, CMD_HEARTBEAT]），保持 QUIC 连接活跃，
+        // 防止空闲超时断连。sing-box 的 TUIC 不使用 QUIC 原生 keep_alive_interval
+        // （PING 帧），而是用应用层 Heartbeat datagram 作为保活机制。
+        let conn_hb = self.clone();
+        let heartbeat = self.cfg.heartbeat;
+        tokio::spawn(async move {
+            let mut ticker = time::interval(heartbeat);
+            // 跳过第一次立即触发（连接刚建立，无需立即发心跳）
+            ticker.tick().await;
+            loop {
+                if conn_hb.inner.close_reason().is_some() {
+                    return;
+                }
+                ticker.tick().await;
+                if conn_hb.inner.close_reason().is_some() {
+                    return;
+                }
+                // SendDatagram([Version, CommandHeartbeat])
+                if let Err(e) = conn_hb
+                    .inner
+                    .send_datagram(Bytes::from_static(&[VERSION, CMD_HEARTBEAT]))
+                {
+                    debug!("[TUIC] {peer} send heartbeat failed: {e}");
+                    return;
+                }
+            }
+        });
+
+        // Event loop
+        loop {
+            if self.inner.close_reason().is_some() {
+                break;
+            }
+            let handle_next = async {
+                tokio::select! {
+                    res = self.inner.accept_uni() => {
+                        let recv = res?;
+                        let conn = self.clone();
+                        tokio::spawn(async move { conn.handle_uni(recv).await });
+                    }
+                    res = self.inner.accept_bi() => {
+                        let (send, recv) = res?;
+                        let conn = self.clone();
+                        tokio::spawn(async move { conn.handle_bi(send, recv).await });
+                    }
+                    res = self.inner.read_datagram() => {
+                        let dg = res?;
+                        let conn = self.clone();
+                        tokio::spawn(async move { conn.handle_datagram(dg).await });
+                    }
+                }
+                Ok::<_, Error>(())
+            };
+
+            match handle_next.await {
+                Ok(()) => {}
+                Err(e) if e.is_trivial() => {
+                    debug!("[TUIC] {peer}: {e}");
+                    break;
+                }
+                Err(e) => {
+                    warn!("[TUIC] {peer}: {e}");
+                    break;
+                }
+            }
+        }
+
+        info!("[TUIC] connection from {peer} closed");
+    }
+
+    // ── Unidirectional stream (Authenticate / Packet / Dissociate) ────────────
+
+    async fn handle_uni(&self, mut recv: RecvStream) {
+        // Peek 2 bytes to verify TUIC prefix before full parse
+        let mut peek = [0u8; 2];
+        if recv.read_exact(&mut peek).await.is_err() {
+            return;
+        }
+        if !crate::tuic::proto::Command::is_tuic_prefix(peek) {
+            warn!("[TUIC] non-TUIC unidirectional stream, ignoring");
+            return;
+        }
+
+        // Re-read with restored 2 bytes prepended via a combined reader
+        // Since quinn RecvStream doesn't support unread, we parse inline:
+        let cmd = self.parse_command_with_prefix(peek, &mut recv).await;
+
+        match cmd {
+            Ok(Command::Authenticate(auth)) => {
+                self.handle_authenticate(auth.uuid, auth.token).await
+            }
+            Ok(Command::Packet(info)) => {
+                self.handle_packet_stream(info, &mut recv, UdpMode::Quic)
+                    .await
+            }
+            Ok(Command::Dissociate(id)) => self.handle_dissociate(id).await,
+            Ok(other) => warn!("[TUIC] unexpected command on uni stream: {:?}", other),
+            Err(e) => warn!("[TUIC] uni stream parse error: {e}"),
+        }
+    }
+
+    // ── Bidirectional stream (Connect) ────────────────────────────────────────
+
+    async fn handle_bi(&self, send: SendStream, mut recv: RecvStream) {
+        let mut peek = [0u8; 2];
+        if recv.read_exact(&mut peek).await.is_err() {
+            return;
+        }
+        if !crate::tuic::proto::Command::is_tuic_prefix(peek) {
+            warn!("[TUIC] non-TUIC bidirectional stream, ignoring");
+            return;
+        }
+
+        // Wait for auth
+        if !self.auth.is_authenticated() {
+            tokio::select! {
+                () = self.auth.wait() => {}
+                () = tokio::time::sleep(self.cfg.auth_timeout) => {
+                    warn!("[TUIC] bi stream: auth wait timeout");
+                    return;
+                }
+            }
+        }
+
+        let cmd = self.parse_command_with_prefix(peek, &mut recv).await;
+        match cmd {
+            Ok(Command::Connect(addr)) => self.handle_connect(addr, send, recv).await,
+            Ok(other) => warn!("[TUIC] unexpected command on bi stream: {:?}", other),
+            Err(e) => warn!("[TUIC] bi stream parse error: {e}"),
+        }
+    }
+
+    // ── Datagram (Packet / Heartbeat) ─────────────────────────────────────────
+
+    async fn handle_datagram(&self, dg: Bytes) {
+        if dg.len() < 2 || !crate::tuic::proto::Command::is_tuic_prefix([dg[0], dg[1]]) {
+            return;
+        }
+
+        if !self.auth.is_authenticated() {
+            tokio::select! {
+                () = self.auth.wait() => {}
+                () = tokio::time::sleep(self.cfg.auth_timeout) => return,
+            }
+        }
+
+        match Command::read_from_datagram(&dg) {
+            Ok(Command::Packet(info)) => {
+                // payload starts after header bytes
+                let hdr_len = 2 + 8 + info.addr.to_bytes().len();
+                if dg.len() < hdr_len {
+                    return;
+                }
+                let payload = dg.slice(hdr_len..);
+                self.handle_packet_data(info, payload, UdpMode::Native)
+                    .await;
+            }
+            Ok(Command::Heartbeat) => debug!("[TUIC] heartbeat"),
+            Ok(other) => warn!("[TUIC] unexpected datagram command: {:?}", other),
+            Err(e) => warn!("[TUIC] datagram parse error: {e}"),
+        }
+    }
+
+    // ── Command implementations ───────────────────────────────────────────────
+
+    async fn handle_authenticate(&self, uuid: Uuid, token: [u8; 32]) {
+        if self.auth.is_authenticated() {
+            warn!("[TUIC] duplicate authentication from {uuid}");
+            return;
+        }
+
+        // Validate: use TLS keying material exporter
+        let valid = if let Some(password) = self.users.get(&uuid) {
+            self.validate_token(&uuid, password, &token)
+        } else {
+            false
+        };
+
+        if valid {
+            info!("[TUIC] authenticated: {uuid}");
+            self.auth.set(uuid);
+        } else {
+            warn!("[TUIC] authentication failed for {uuid}");
+            self.inner.close(quinn::VarInt::from_u32(0), b"auth failed");
+        }
+    }
+
+    fn validate_token(&self, uuid: &Uuid, password: &str, token: &[u8; 32]) -> bool {
+        // TUIC uses TLS keying material exporter:
+        // label = uuid raw 16 bytes, context = password bytes
+        let mut expected = [0u8; 32];
+        if self
+            .inner
+            .export_keying_material(&mut expected, uuid.as_bytes(), password.as_bytes())
+            .is_ok()
+        {
+            return expected == *token;
+        }
+        false
+    }
+
+    async fn handle_connect(&self, addr: Address, mut send: SendStream, mut recv: RecvStream) {
+        let target = addr.to_string();
+        info!("[TUIC][TCP] connecting to {target}");
+
+        let mut stream = match self.dial_tcp(&addr).await {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("[TUIC][TCP] {target}: dial failed: {e}");
+                let _ = send.reset(quinn::VarInt::from_u32(0));
+                return;
+            }
+        };
+        let _ = stream.set_nodelay(true);
+
+        // Bidirectional copy
+        let (mut tcp_r, mut tcp_w) = stream.split();
+        let c2s = tokio::io::copy(&mut recv, &mut tcp_w);
+        let s2c = tokio::io::copy(&mut tcp_r, &mut send);
+
+        tokio::select! {
+            r = c2s => {
+                if let Err(e) = r { debug!("[TUIC][TCP] {target} c2s: {e}"); }
+            }
+            r = s2c => {
+                if let Err(e) = r { debug!("[TUIC][TCP] {target} s2c: {e}"); }
+            }
+        }
+
+        let _ = send.finish();
+        info!("[TUIC][TCP] {target} done");
+    }
+
+    async fn handle_packet_stream(&self, info: PacketInfo, recv: &mut RecvStream, mode: UdpMode) {
+        // Wait for auth
+        if !self.auth.is_authenticated() {
+            tokio::select! {
+                () = self.auth.wait() => {}
+                () = tokio::time::sleep(self.cfg.auth_timeout) => return,
+            }
+        }
+
+        // Read payload
+        let mut payload = vec![0u8; info.size as usize];
+        if recv.read_exact(&mut payload).await.is_err() {
+            return;
+        }
+        self.handle_packet_data(info, Bytes::from(payload), mode)
+            .await;
+    }
+
+    async fn handle_packet_data(&self, info: PacketInfo, payload: Bytes, mode: UdpMode) {
+        // Set/verify UDP mode consistency
+        {
+            let mut m = self.udp_mode.lock().unwrap();
+            match *m {
+                None => *m = Some(mode),
+                Some(existing) => {
+                    // Allow if same mode; warn if mismatch but continue
+                    if matches!(
+                        (existing, mode),
+                        (UdpMode::Native, UdpMode::Quic) | (UdpMode::Quic, UdpMode::Native)
+                    ) {
+                        warn!("[TUIC][UDP] mode mismatch: expected {existing}, got {mode}");
+                    }
+                }
+            }
+        }
+
+        let assoc_id = info.assoc_id;
+        info!(
+            "[TUIC][UDP][{assoc_id:#06x}] pkt {} frag {}/{} from {}",
+            info.pkt_id,
+            info.frag_id + 1,
+            info.frag_total,
+            info.addr
+        );
+
+        // Get or create UDP session（提前创建，分片重组表在 session 内）
+        let session = {
+            let mut sessions = self.udp_sessions.lock().await;
+            if let Some(s) = sessions.get(&assoc_id) {
+                s.clone()
+            } else {
+                match UdpSession::new(
+                    self.clone(),
+                    assoc_id,
+                    self.cfg.udp_relay_ipv6,
+                    self.cfg.udp_timeout,
+                    self.cfg.max_udp_packet_size,
+                )
+                .await
+                {
+                    Ok(s) => {
+                        sessions.insert(assoc_id, s.clone());
+                        s
+                    }
+                    Err(e) => {
+                        warn!("[TUIC][UDP][{assoc_id:#06x}] session create failed: {e}");
+                        return;
+                    }
+                }
+            }
+        };
+
+        // ── 分片处理 ──────────────────────────────────────────────────────
+        //
+        // 对齐 sing-quic tuic.udpDefragger：当 frag_total > 1 时，只有 frag_id=0
+        // 携带目标地址（Address），其余分片的地址为 None。服务端需收集全部分片
+        // 后按 frag_id 顺序拼接，再使用 frag_id=0 的地址发送。
+        //
+        // frag_total == 1：直接发送，无需重组。
+        // frag_total > 1：送入 defragger，全部分片到齐后发送。
+
+        if info.frag_total <= 1 {
+            // 无分片，直接发送
+            let target_addr = match self.resolve_addr(&info.addr).await {
+                Ok(a) => a,
+                Err(e) => {
+                    warn!(
+                        "[TUIC][UDP][{assoc_id:#06x}] resolve {} failed: {e}",
+                        info.addr
+                    );
+                    return;
+                }
+            };
+            if let Err(e) = session.send(payload, target_addr).await {
+                warn!("[TUIC][UDP][{assoc_id:#06x}] send to {target_addr}: {e}");
+            }
+            return;
+        }
+
+        // 分片重组
+        let pkt_id = info.pkt_id;
+        let frag_id = info.frag_id;
+        let frag_total = info.frag_total;
+
+        // 对于 frag_id=0，地址有效；其余分片地址为 None
+        let frag_addr = if frag_id == 0 {
+            Some(info.addr.clone())
+        } else {
+            None
+        };
+
+        let reassembled = {
+            let mut defragger = session.defragger.lock().await;
+            let buf = defragger
+                .entry(pkt_id)
+                .or_insert_with(|| TuicFragBuffer::new(frag_total, frag_addr.clone()));
+            match buf.insert(frag_id, payload, frag_addr) {
+                Some((data, addr)) => {
+                    defragger.remove(&pkt_id);
+                    Some((data, addr))
+                }
+                None => None,
+            }
+        };
+
+        if let Some((data, addr)) = reassembled {
+            let target_addr = match self.resolve_addr(&addr).await {
+                Ok(a) => a,
+                Err(e) => {
+                    warn!(
+                        "[TUIC][UDP][{assoc_id:#06x}] resolve {} (reassembled) failed: {e}",
+                        addr
+                    );
+                    return;
+                }
+            };
+            debug!(
+                "[TUIC][UDP][{assoc_id:#06x}] reassembled pkt {} ({} bytes) → {target_addr}",
+                pkt_id,
+                data.len()
+            );
+            if let Err(e) = session.send(data, target_addr).await {
+                warn!("[TUIC][UDP][{assoc_id:#06x}] send reassembled to {target_addr}: {e}");
+            }
+        }
+    }
+
+    async fn handle_dissociate(&self, assoc_id: u16) {
+        info!("[TUIC][UDP][{assoc_id:#06x}] dissociate");
+        if let Some(session) = self.udp_sessions.lock().await.remove(&assoc_id) {
+            session.close().await;
+        }
+    }
+
+    // ── Relay UDP back to TUIC client ─────────────────────────────────────────
+
+    pub async fn relay_udp_to_client(&self, header: Vec<u8>, payload: Bytes) {
+        let mode = *self.udp_mode.lock().unwrap();
+        match mode {
+            Some(UdpMode::Native) | None => {
+                // Send as datagram
+                let mut dg = bytes::BytesMut::with_capacity(header.len() + payload.len());
+                dg.extend_from_slice(&header);
+                dg.extend_from_slice(&payload);
+                if let Err(e) = self.inner.send_datagram(dg.freeze()) {
+                    warn!("[TUIC][UDP] relay datagram failed: {e}");
+                }
+            }
+            Some(UdpMode::Quic) => {
+                // Send as uni stream
+                match self.inner.open_uni().await {
+                    Ok(mut send) => {
+                        let _ = send.write_all(&header).await;
+                        let _ = send.write_all(&payload).await;
+                        let _ = send.finish();
+                    }
+                    Err(e) => warn!("[TUIC][UDP] open_uni for relay failed: {e}"),
+                }
+            }
+        }
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    async fn dial_tcp(&self, addr: &Address) -> anyhow::Result<TcpStream> {
+        let addrs = self.resolve_addr_list(addr).await?;
+        let outbound = crate::common::outbound::Outbound::new(
+            self.cfg.outbound_bind_ipv4,
+            self.cfg.outbound_bind_ipv6,
+            &self.cfg.outbound,
+        );
+        let mut last_err = None;
+        for sa in addrs {
+            match crate::common::outbound::dial_tcp_addr(sa, &outbound).await {
+                Ok(s) => return Ok(s),
+                Err(e) => last_err = Some(e),
+            }
+        }
+        Err(last_err
+            .map(|e| anyhow::anyhow!(e))
+            .unwrap_or_else(|| anyhow::anyhow!("no addresses resolved for {addr}")))
+    }
+
+    async fn resolve_addr(&self, addr: &Address) -> anyhow::Result<SocketAddr> {
+        let list = self.resolve_addr_list(addr).await?;
+        list.into_iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("no addresses resolved for {addr}"))
+    }
+
+    async fn resolve_addr_list(&self, addr: &Address) -> anyhow::Result<Vec<SocketAddr>> {
+        match addr {
+            Address::None => Err(anyhow::anyhow!("empty address")),
+            Address::SocketAddress(sa) => Ok(vec![*sa]),
+            Address::DomainAddress(domain, port) => {
+                let addrs: Vec<SocketAddr> =
+                    net::lookup_host((domain.as_str(), *port)).await?.collect();
+                if addrs.is_empty() {
+                    return Err(anyhow::anyhow!("DNS resolve failed for {domain}:{port}"));
+                }
+                Ok(addrs)
+            }
+        }
+    }
+
+    /// Parse a TUIC command when we've already consumed the 2-byte VER+TYPE prefix
+    async fn parse_command_with_prefix(
+        &self,
+        prefix: [u8; 2],
+        recv: &mut RecvStream,
+    ) -> Result<Command, Error> {
+        let ver = prefix[0];
+        let cmd = prefix[1];
+
+        if ver != VERSION {
+            return Err(Error::Protocol(format!("unsupported TUIC version: {ver}")));
+        }
+
+        use crate::tuic::proto::{
+            CMD_AUTHENTICATE, CMD_CONNECT, CMD_DISSOCIATE, CMD_HEARTBEAT, CMD_PACKET,
+        };
+
+        match cmd {
+            CMD_AUTHENTICATE => {
+                let mut buf = [0u8; 48];
+                recv.read_exact(&mut buf).await.map_err(Error::from)?;
+                let uuid = uuid::Uuid::from_bytes(buf[..16].try_into().unwrap());
+                let token: [u8; 32] = buf[16..48].try_into().unwrap();
+                Ok(Command::Authenticate(crate::tuic::proto::AuthInfo {
+                    uuid,
+                    token,
+                }))
+            }
+            CMD_CONNECT => {
+                let addr = Address::read_from(recv).await.map_err(Error::Io)?;
+                Ok(Command::Connect(addr))
+            }
+            CMD_PACKET => {
+                let mut buf = [0u8; 8];
+                recv.read_exact(&mut buf).await.map_err(Error::from)?;
+                let assoc_id = u16::from_be_bytes([buf[0], buf[1]]);
+                let pkt_id = u16::from_be_bytes([buf[2], buf[3]]);
+                let frag_total = buf[4];
+                let frag_id = buf[5];
+                let size = u16::from_be_bytes([buf[6], buf[7]]);
+                let addr = Address::read_from(recv).await.map_err(Error::Io)?;
+                Ok(Command::Packet(PacketInfo {
+                    assoc_id,
+                    pkt_id,
+                    frag_total,
+                    frag_id,
+                    size,
+                    addr,
+                }))
+            }
+            CMD_DISSOCIATE => {
+                let mut buf = [0u8; 2];
+                recv.read_exact(&mut buf).await.map_err(Error::from)?;
+                Ok(Command::Dissociate(u16::from_be_bytes(buf)))
+            }
+            CMD_HEARTBEAT => Ok(Command::Heartbeat),
+            _ => Err(Error::Protocol(format!("unknown command: {cmd}"))),
+        }
+    }
+}
