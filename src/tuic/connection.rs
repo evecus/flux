@@ -224,9 +224,18 @@ impl TuicUdpPair {
         match self {
             TuicUdpPair::Direct { v4, v6 } => {
                 if let Some(v6) = v6 {
+                    let mut buf_v6 = vec![0u8; buf.len()];
                     tokio::select! {
                         r = v4.recv_from(buf) => r,
-                        r = v6.recv_from(buf) => r,
+                        r = v6.recv_from(&mut buf_v6) => {
+                            match r {
+                                Ok((n, addr)) => {
+                                    buf[..n].copy_from_slice(&buf_v6[..n]);
+                                    Ok((n, addr))
+                                }
+                                Err(e) => Err(e),
+                            }
+                        }
                     }
                 } else {
                     v4.recv_from(buf).await

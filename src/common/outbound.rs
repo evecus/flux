@@ -400,11 +400,12 @@ async fn read_socks5_reply_addr(stream: &mut TcpStream) -> io::Result<SocketAddr
             stream.read_exact(&mut b).await?;
             // BND.ADDR 极少是域名；退回解析失败当 unspecified 处理。
             let s = String::from_utf8_lossy(&b).to_string();
-            tokio::net::lookup_host((s.as_str(), 0))
+            let resolved = tokio::net::lookup_host((s.as_str(), 0))
                 .await?
                 .next()
                 .map(|a| a.ip())
-                .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED))
+                .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+            resolved
         }
         other => {
             return Err(io::Error::new(

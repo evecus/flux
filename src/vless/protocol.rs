@@ -29,7 +29,7 @@ use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tracing::debug;
 
-use crate::common::outbound::{self as shared_net, Outbound, UdpRelay};
+use crate::common::outbound::{Outbound, UdpRelay};
 
 // ── Constants (Xray protocol values) ─────────────────────────────────────────
 
