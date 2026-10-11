@@ -28,7 +28,7 @@ const MAX_HEADER_BYTES: usize = 16 * 1024;
 const MAX_HEADER_LINES: usize = 128;
 
 pub async fn run(cfg: Arc<HttpConfig>) -> Result<()> {
-    let tls_acceptor = if let Some(t) = &cfg.tls {
+    let tls_acceptor = if let Some(t) = cfg.tls.as_opt() {
         let sc = shared_tls::build(
             t.cert_path.as_deref(),
             t.key_path.as_deref(),
@@ -39,7 +39,7 @@ pub async fn run(cfg: Arc<HttpConfig>) -> Result<()> {
         None
     };
 
-    let addr: SocketAddr = cfg.listen.parse()?;
+    let addr: SocketAddr = crate::config::join_listen_addr(&cfg.listen, cfg.port)?;
     let listener = TcpListener::bind(addr).await?;
     info!(
         "[http] Listening on {addr} (tls={}, auth={})",
@@ -113,7 +113,7 @@ where
         }
     }
 
-    let outbound_cfg = Outbound::new(cfg.outbound_bind_ipv4, cfg.outbound_bind_ipv6, &cfg.outbound);
+    let outbound_cfg = Outbound::new(&cfg.outbound);
 
     if method.eq_ignore_ascii_case("CONNECT") {
         // CONNECT host:port HTTP/1.1 —— target 本身就是 "host:port"
