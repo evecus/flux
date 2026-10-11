@@ -49,11 +49,11 @@ pub async fn run(cfg: Arc<AnyTlsConfig>) -> Result<()> {
         }
     }
 
-    let addr: SocketAddr = cfg.listen.parse()?;
+    let addr: SocketAddr = crate::config::join_listen_addr(&cfg.listen, cfg.port)?;
     let listener = TcpListener::bind(addr).await?;
     info!("[anytls] listening on {addr}");
 
-    let outbound = Outbound::new(cfg.outbound_bind_ipv4, cfg.outbound_bind_ipv6, &cfg.outbound);
+    let outbound = Outbound::new(&cfg.outbound);
 
     loop {
         let (stream, peer) = listener.accept().await?;
