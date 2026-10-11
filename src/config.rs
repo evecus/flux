@@ -986,10 +986,6 @@ impl Config {
     }
 }
 
-pub fn load(path: &str) -> Result<Config> {
-    load_with_base(path, None)
-}
-
 /// Load YAML config. Relative cert/key paths resolve against `base_dir`
 /// (or the config file's parent directory when `base_dir` is `None`).
 pub fn load_with_base(path: &str, base_dir: Option<&Path>) -> Result<Config> {
