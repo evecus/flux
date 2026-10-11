@@ -41,10 +41,7 @@ pub async fn run(cfg: Arc<TuicConfig>) -> Result<()> {
     server_cfg.transport_config(Arc::new(transport));
 
     // ── Bind UDP socket ───────────────────────────────────────────────────────
-    let listen_addr: std::net::SocketAddr = cfg
-        .listen
-        .parse()
-        .with_context(|| format!("invalid listen address: {}", cfg.listen))?;
+    let listen_addr: std::net::SocketAddr = crate::config::join_listen_addr(&cfg.listen, cfg.port)?;
 
     let socket = {
         let domain = if listen_addr.is_ipv4() {
@@ -67,7 +64,7 @@ pub async fn run(cfg: Arc<TuicConfig>) -> Result<()> {
     )?;
 
     // ── Build user map ────────────────────────────────────────────────────────
-    let users: Arc<HashMap<Uuid, String>> = Arc::new(cfg.users.clone());
+    let users: Arc<HashMap<Uuid, String>> = Arc::new(cfg.users_map());
 
     info!("[TUIC] listening on {listen_addr}");
 
