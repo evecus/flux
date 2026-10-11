@@ -47,18 +47,18 @@ pub async fn run(cfg: Arc<VlessConfig>) -> Result<()> {
         Some(VlessTlsConfig::Reality(_)) => "reality",
     };
 
-    let addr: SocketAddr = cfg.listen.parse()?;
+    let addr: SocketAddr = crate::config::join_listen_addr(&cfg.listen, cfg.port)?;
     let listener = TcpListener::bind(addr).await?;
     info!(
         "[vless] Listening on {addr} (transport={}, tls={tls_label})",
-        cfg.transport.r#type,
+        cfg.transport.kind,
     );
 
     // ── xhttp：server 级别，跨 TCP 连接共享 session 表 ────────────────────────
-    if cfg.transport.r#type == "xhttp" {
+    if cfg.transport.kind == "xhttp" {
         let xh_cfg = XhttpConfig {
-            path: cfg.transport.xhttp_path.clone(),
-            host: cfg.transport.xhttp_host.clone(),
+            path: cfg.transport.path.clone(),
+            host: cfg.transport.host.clone(),
         };
         let xhttp_server = XhttpServer::new(xh_cfg);
 
@@ -121,7 +121,7 @@ pub async fn run(cfg: Arc<VlessConfig>) -> Result<()> {
                     break;
                 }
                 Some(xhs) => {
-                    let outbound = Outbound::new(cfg.outbound_bind_ipv4, cfg.outbound_bind_ipv6, &cfg.outbound);
+                    let outbound = Outbound::new(&cfg.outbound);
                     tokio::spawn(async move {
                         // peer 信息在 xhttp 层，这里用占位符
                         let peer: SocketAddr = "0.0.0.0:0".parse().unwrap();
@@ -157,8 +157,8 @@ async fn handle_conn(
     uuid_bytes: [u8; 16],
     tls_acceptor: Option<Arc<TlsAcceptor>>,
 ) -> Result<()> {
-    let transport_type = cfg.transport.r#type.as_str();
-    let outbound = Outbound::new(cfg.outbound_bind_ipv4, cfg.outbound_bind_ipv6, &cfg.outbound);
+    let transport_type = cfg.transport.kind.as_str();
+    let outbound = Outbound::new(&cfg.outbound);
 
     match (transport_type, &cfg.tls) {
         // ── TCP, no TLS ───────────────────────────────────────────────────
