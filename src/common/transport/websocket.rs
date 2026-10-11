@@ -54,11 +54,11 @@ impl WsAcceptOptions {
 /// 从 TransportConfig 构建 WsAcceptOptions。
 pub fn opts_from_transport(t: &crate::config::TransportConfig) -> WsAcceptOptions {
     WsAcceptOptions {
-        path: t.ws_path.clone(),
-        host: t.ws_host.clone(),
-        max_early_data: t.ws_max_early_data,
-        early_data_header_name: t.ws_early_data_header_name.clone(),
-        headers: t.ws_headers.clone(),
+        path: t.path.clone(),
+        host: t.host.clone(),
+        max_early_data: t.max_early_data,
+        early_data_header_name: t.early_data_header.clone(),
+        headers: t.headers.clone(),
     }
 }
 
