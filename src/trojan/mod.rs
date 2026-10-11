@@ -49,7 +49,7 @@ const TROJAN_UDP_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const TROJAN_UDP_MAX_PACKET: usize = 65535;
 
 pub async fn run(cfg: Arc<TrojanConfig>) -> Result<()> {
-    let tls_acceptor = if let Some(t) = &cfg.tls {
+    let tls_acceptor = if let Some(t) = cfg.tls.as_opt() {
         let sc = shared_tls::build(
             t.cert_path.as_deref(),
             t.key_path.as_deref(),
@@ -59,23 +59,23 @@ pub async fn run(cfg: Arc<TrojanConfig>) -> Result<()> {
     } else {
         None
     };
-    let addr: SocketAddr = cfg.listen.parse()?;
+    let addr: SocketAddr = crate::config::join_listen_addr(&cfg.listen, cfg.port)?;
     let listener = TcpListener::bind(addr).await?;
     info!(
         "[trojan] Listening on {addr} (transport={}, tls={})",
-        cfg.transport.r#type,
+        cfg.transport.kind,
         if tls_acceptor.is_some() { "yes" } else { "no" },
     );
 
     // ── xhttp：server 级别 session 表 ─────────────────────────────────────────
-    if cfg.transport.r#type == "xhttp" {
+    if cfg.transport.kind == "xhttp" {
         let xh_cfg = XhttpConfig {
-            path: cfg.transport.xhttp_path.clone(),
-            host: cfg.transport.xhttp_host.clone(),
+            path: cfg.transport.path.clone(),
+            host: cfg.transport.host.clone(),
         };
         let xhttp_server = XhttpServer::new(xh_cfg);
         let password = cfg.password.clone();
-        let bind_ip = Outbound::new(cfg.outbound_bind_ipv4, cfg.outbound_bind_ipv6, &cfg.outbound);
+        let bind_ip = Outbound::new(&cfg.outbound);
 
         let srv_feed = xhttp_server.clone();
         let tls2 = tls_acceptor.clone();
@@ -147,7 +147,7 @@ async fn handle(
     cfg: &TrojanConfig,
     tls_acceptor: Option<Arc<TlsAcceptor>>,
 ) -> Result<()> {
-    let transport = cfg.transport.r#type.as_str();
+    let transport = cfg.transport.kind.as_str();
 
     let mut io: Box<dyn AsyncReadWrite> = match (transport, tls_acceptor) {
         ("tcp", None) => Box::new(stream),
@@ -164,7 +164,7 @@ async fn handle(
         }
         _ => bail!("trojan: unknown transport"),
     };
-    let outbound_cfg = Outbound::new(cfg.outbound_bind_ipv4, cfg.outbound_bind_ipv6, &cfg.outbound);
+    let outbound_cfg = Outbound::new(&cfg.outbound);
     process(&mut *io, peer, &cfg.password, &outbound_cfg).await
 }
 
