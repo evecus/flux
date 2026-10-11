@@ -50,7 +50,7 @@ pub async fn run(cfg: Arc<NaiveproxyConfig>) -> Result<()> {
     )?;
     let tls_acceptor = TlsAcceptor::from(Arc::new(sc));
 
-    let addr: SocketAddr = cfg.listen.parse()?;
+    let addr: SocketAddr = crate::config::join_listen_addr(&cfg.listen, cfg.port)?;
     let listener = TcpListener::bind(addr).await?;
     info!(
         "[naiveproxy] Listening on {addr} (users={}, padding={})",
@@ -130,7 +130,7 @@ async fn handle_request(
 
     let client_wants_padding = cfg.padding && request.headers().contains_key(PADDING_HEADER);
 
-    let outbound_cfg = Outbound::new(cfg.outbound_bind_ipv4, cfg.outbound_bind_ipv6, &cfg.outbound);
+    let outbound_cfg = Outbound::new(&cfg.outbound);
     let outbound = match shared_net::dial_tcp(&target, &outbound_cfg).await {
         Ok(s) => s,
         Err(e) => {
@@ -262,8 +262,10 @@ async fn serve_masquerade(
     mut respond: SendResponse<Bytes>,
     cfg: &NaiveproxyConfig,
 ) -> Result<()> {
-    let resp = match &cfg.masquerade {
-        Some(m) => masquerade_proxy(&request, &m.url, m.rewrite_host).await,
+    let resp = match &cfg.masquerade.masquerade_url {
+        Some(url) => {
+            masquerade_proxy(&request, url, cfg.masquerade.masquerade_rewrite_host).await
+        }
         None => masquerade_404(),
     };
 
