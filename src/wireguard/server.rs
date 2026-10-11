@@ -133,7 +133,7 @@ pub async fn run(cfg: Arc<WireGuardConfig>) -> Result<()> {
     let stack_txs = Arc::new(stack_txs);
 
     // ── 绑定 UDP 套接字 ───────────────────────────────────────────────────────
-    let listen_addr: SocketAddr = cfg.listen.parse()?;
+    let listen_addr: SocketAddr = crate::config::join_listen_addr(&cfg.listen, cfg.port)?;
     let socket = Arc::new(UdpSocket::bind(listen_addr).await?);
     info!(
         "[wireguard] listening on {listen_addr} ({} peers)",
