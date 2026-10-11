@@ -79,19 +79,19 @@ pub async fn run(cfg: Arc<VmessConfig>) -> Result<()> {
     let uuid = parse_uuid(&cfg.uuid)?;
     let cmd_key = vmess_cmd_key(&uuid);
     let acceptor = build_tls(&cfg)?;
-    let addr: SocketAddr = cfg.listen.parse()?;
+    let addr: SocketAddr = crate::config::join_listen_addr(&cfg.listen, cfg.port)?;
     let listener = TcpListener::bind(addr).await?;
     info!("[vmess] Listening on {addr}");
 
-    if cfg.transport.r#type == "xhttp" {
+    if cfg.transport.kind == "xhttp" {
         let xh_cfg = XhttpConfig {
-            path: cfg.transport.xhttp_path.clone(),
-            host: cfg.transport.xhttp_host.clone(),
+            path: cfg.transport.path.clone(),
+            host: cfg.transport.host.clone(),
         };
         let srv = XhttpServer::new(xh_cfg);
         let srv_feed = srv.clone();
         let tls2 = acceptor.clone();
-        let outbound = Outbound::new(cfg.outbound_bind_ipv4, cfg.outbound_bind_ipv6, &cfg.outbound);
+        let outbound = Outbound::new(&cfg.outbound);
         tokio::spawn(async move {
             loop {
                 let (stream, peer) = match listener.accept().await {
@@ -155,7 +155,7 @@ pub async fn run(cfg: Arc<VmessConfig>) -> Result<()> {
 }
 
 fn build_tls(cfg: &VmessConfig) -> Result<Option<Arc<TlsAcceptor>>> {
-    match &cfg.tls {
+    match cfg.tls.as_opt() {
         None => Ok(None),
         Some(t) => {
             let sc = shared_tls::build(
@@ -178,7 +178,7 @@ async fn handle(
     cmd_key: [u8; 16],
     tls: Option<Arc<TlsAcceptor>>,
 ) -> Result<()> {
-    let mut io: Box<dyn RW> = match (cfg.transport.r#type.as_str(), tls) {
+    let mut io: Box<dyn RW> = match (cfg.transport.kind.as_str(), tls) {
         ("tcp", None) => Box::new(stream),
         ("tcp", Some(a)) => Box::new(a.accept(stream).await?),
         ("ws", None) => Box::new(
@@ -197,7 +197,7 @@ async fn handle(
         &mut *io,
         peer,
         cmd_key,
-        Outbound::new(cfg.outbound_bind_ipv4, cfg.outbound_bind_ipv6, &cfg.outbound),
+        Outbound::new(&cfg.outbound),
     )
     .await
 }
