@@ -15,19 +15,15 @@ env:
 jobs:
   build:
     name: Build (${{ matrix.target }})
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-musl
-            os: ubuntu-latest
             artifact: flux-linux-x86_64
-            cross: true
           - target: aarch64-unknown-linux-musl
-            os: ubuntu-latest
             artifact: flux-linux-aarch64
-            cross: true
 
     steps:
       - uses: actions/checkout@v4
@@ -37,36 +33,35 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Cache cargo registry
+      - name: Cache cargo registry and target
         uses: actions/cache@v4
         with:
           path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-registry-
-
-      - name: Cache cross binary
-        id: cache-cross
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/bin/cross
-          key: cross-bin-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+            ${{ runner.os }}-${{ matrix.target }}-cargo-
 
       - name: Install cross
-        if: matrix.cross && steps.cache-cross.outputs.cache-hit != 'true'
-        run: cargo install cross --git https://github.com/cross-rs/cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
 
-      - name: Inject version into Cargo.toml
+      # 同时更新 Cargo.toml 与 Cargo.lock 中 flux 包的版本，
+      # 否则 --locked 会因 lock 文件需要更新而失败
+      - name: Inject version
+        env:
+          VERSION: ${{ github.event.inputs.version }}
         run: |
-          VERSION="${{ github.event.inputs.version }}"
-          sed -i "s/^version = .*/version = \"${VERSION#v}\"/" Cargo.toml
+          V="${VERSION#v}"
+          sed -i "/^name = \"flux\"\$/{n;s/^version = .*/version = \"${V}\"/}" Cargo.toml Cargo.lock
+          grep -A1 '^name = "flux"$' Cargo.toml Cargo.lock
 
-      - name: Build (cross)
-        if: matrix.cross
-        run: cross build --release --target ${{ matrix.target }}
+      - name: Build release
+        run: cross build --release --target ${{ matrix.target }} --locked
 
       - name: Rename artifact
         run: |
@@ -98,7 +93,7 @@ jobs:
         run: |
           mkdir -p release_assets
           cp dist/flux-* release_assets/
-          cp config-example.toml release_assets/config-example.toml
+          cp config.example.yaml release_assets/config.example.yaml
           echo "Assets prepared:"
           ls -R release_assets/
 
@@ -112,4 +107,4 @@ jobs:
           generate_release_notes: true
           files: |
             release_assets/flux-*
-            release_assets/config-example.toml
+            release_assets/config.example.yaml
