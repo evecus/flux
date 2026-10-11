@@ -1,0 +1,437 @@
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║                     flux 服务端配置模板（YAML，不兼容旧 TOML）                 ║
+# ╠══════════════════════════════════════════════════════════════════════════════╣
+# ║  • 默认文件：config.yaml（可用 -c 指定）                                      ║
+# ║  • 每个节点在 nodes: 下声明，name 必填且全局唯一                              ║
+# ║  • type 决定协议；listen + port 必填                                          ║
+# ║  • 字段统一 kebab-case                                                        ║
+# ║  • 同一进程可同时跑多种协议多个节点                                           ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+
+# ── 日志 ──────────────────────────────────────────────────────────────────────
+# error | warn | info | debug | trace | off
+# off：关闭全部日志。若设置了环境变量 RUST_LOG，则以 RUST_LOG 为准。
+log-level: info
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 公共说明（所有节点通用）
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# listen / port
+#   listen: 绑定地址，如 "0.0.0.0"、"127.0.0.1"、"::"（IPv6 勿写端口）
+#   port:   端口数字
+#
+# 出口 IP（多公网 IP；wireguard 节点不支持）
+#   outbound-bind-ipv4: "203.0.113.10"
+#   outbound-bind-ipv6: "2001:db8::1"
+#   都不填 → 系统默认路由
+#   只填一个 → 该地址族出站必须走该 IP，目标无对应记录则拒绝
+#   都填 → 按目标地址族自动选择
+#   IP 必须已在本机网卡上
+#
+# 链式出站（可选；不填则直连，仍受 outbound-bind-* 约束）
+#   outbound:
+#     type: socks5
+#     addr: "127.0.0.1:1080"
+#     username: user      # 可选
+#     password: pass      # 可选
+#   配置后该节点 TCP/UDP 出站均经此 SOCKS5；握手失败不回退直连
+#
+# 标准 TLS（多个协议共用结构 StandardTlsConfig）
+#   tls:
+#     cert-path: /path/to/fullchain.pem
+#     key-path: /path/to/privkey.pem
+#     # 或自签（与 cert/key 二选一思路）：
+#     self-signed-domain: example.com
+#
+# 传输层 transport（vless / vmess / trojan / shadowsocks 等）
+#   transport:
+#     type: tcp                 # tcp | ws | xhttp（默认 tcp）
+#     ws-path: /
+#     ws-host: your.domain.com  # 可选，严格校验 Host
+#     ws-max-early-data: 0      # >0 启用 WS 0-RTT 早期数据
+#     ws-early-data-header-name: Sec-WebSocket-Protocol  # 不填则走 URL 路径
+#     ws-headers:               # 可选自定义请求头
+#       User-Agent: Mozilla/5.0
+#     xhttp-path: /
+#     xhttp-host: your.domain.com
+
+
+nodes:
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # 1. Hysteria2   (QUIC + TLS)
+  # ════════════════════════════════════════════════════════════════════════════
+  # 生成密码：flux generate password
+  #
+  # - name: hy2-main
+  #   type: hysteria2
+  #   listen: "0.0.0.0"
+  #   port: 443
+  #   tls:
+  #     cert-path: /etc/ssl/certs/server.crt
+  #     key-path: /etc/ssl/private/server.key
+  #     # self-signed-domain: hy2.example.com
+  #   auth:
+  #     type: password          # password | none
+  #     password: your-strong-password-here
+  #   bandwidth:                # 强烈建议按真实带宽填写
+  #     up: "300 mbps"          # 服务端→客户端（用户下载）
+  #     down: "50 mbps"         # 客户端→服务端（用户上传）
+  #     # 单位：gbps / mbps / kbps / bps（可带空格）
+  #   masquerade:               # 可选伪装
+  #     type: proxy             # 默认 none
+  #     proxy:
+  #       url: "https://example.com"
+  #       rewrite-host: true
+  #   outbound-bind-ipv4: "203.0.113.10"
+  #   outbound-bind-ipv6: "2001:db8::1"
+  #   outbound:
+  #     type: socks5
+  #     addr: "127.0.0.1:1080"
+  #     username: user
+  #     password: pass
+
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # 2. VLESS
+  # ════════════════════════════════════════════════════════════════════════════
+  # 生成 UUID：flux generate uuid
+  # 生成 Reality 密钥：flux generate reality-keypair
+  # tls.type: tls | reality；省略 tls = 明文（仅内网/已有外层 TLS）
+  #
+  # ── 2-A 标准 TLS + TCP ──
+  # - name: vless-tls
+  #   type: vless
+  #   listen: "0.0.0.0"
+  #   port: 8443
+  #   uuid: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+  #   transport:
+  #     type: tcp
+  #   tls:
+  #     type: tls
+  #     cert-path: /etc/ssl/certs/server.crt
+  #     key-path: /etc/ssl/private/server.key
+  #     # self-signed-domain: vless.example.com
+  #   outbound-bind-ipv4: null
+  #   outbound-bind-ipv6: null
+  #   outbound: null
+  #
+  # ── 2-B Reality ──
+  # - name: vless-reality
+  #   type: vless
+  #   listen: "0.0.0.0"
+  #   port: 443
+  #   uuid: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+  #   transport:
+  #     type: tcp
+  #   tls:
+  #     type: reality
+  #     private-key: YOUR_X25519_PRIVATE_KEY_BASE64URL
+  #     short-ids: ["deadbeef", "cafebabe"]   # 1–8 字节 hex
+  #     dest: "www.microsoft.com:443"
+  #     server-name: "www.microsoft.com"
+  #     max-time-diff: 90                     # 秒；0=不检查
+  #
+  # ── 2-C TLS + WebSocket ──
+  # - name: vless-ws
+  #   type: vless
+  #   listen: "0.0.0.0"
+  #   port: 443
+  #   uuid: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+  #   transport:
+  #     type: ws
+  #     ws-path: /vless
+  #     ws-host: your.domain.com
+  #     ws-max-early-data: 0
+  #     ws-early-data-header-name: null
+  #     ws-headers:
+  #       User-Agent: Mozilla/5.0
+  #   tls:
+  #     type: tls
+  #     cert-path: /etc/ssl/certs/server.crt
+  #     key-path: /etc/ssl/private/server.key
+  #
+  # ── 2-D TLS + XHTTP ──
+  # - name: vless-xhttp
+  #   type: vless
+  #   listen: "0.0.0.0"
+  #   port: 443
+  #   uuid: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+  #   transport:
+  #     type: xhttp
+  #     xhttp-path: /xhttp
+  #     xhttp-host: your.domain.com
+  #   tls:
+  #     type: tls
+  #     cert-path: /etc/ssl/certs/server.crt
+  #     key-path: /etc/ssl/private/server.key
+
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # 3. VMess
+  # ════════════════════════════════════════════════════════════════════════════
+  # - name: vmess-main
+  #   type: vmess
+  #   listen: "0.0.0.0"
+  #   port: 8443
+  #   uuid: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+  #   transport:
+  #     type: tcp                # tcp | ws | xhttp
+  #     ws-path: /
+  #     ws-host: null
+  #     ws-max-early-data: 0
+  #     ws-early-data-header-name: null
+  #     ws-headers: null
+  #     xhttp-path: /
+  #     xhttp-host: null
+  #   tls:                      # 可选；不配=明文
+  #     cert-path: /etc/ssl/certs/server.crt
+  #     key-path: /etc/ssl/private/server.key
+  #     self-signed-domain: null
+  #   outbound-bind-ipv4: null
+  #   outbound-bind-ipv6: null
+  #   outbound: null
+
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # 4. Trojan
+  # ════════════════════════════════════════════════════════════════════════════
+  # - name: trojan-main
+  #   type: trojan
+  #   listen: "0.0.0.0"
+  #   port: 443
+  #   password: your-trojan-password
+  #   transport:
+  #     type: tcp
+  #     ws-path: /
+  #     ws-host: null
+  #     ws-max-early-data: 0
+  #     ws-early-data-header-name: null
+  #     ws-headers: null
+  #     xhttp-path: /
+  #     xhttp-host: null
+  #   tls:                      # 可选
+  #     cert-path: /etc/ssl/certs/server.crt
+  #     key-path: /etc/ssl/private/server.key
+  #     self-signed-domain: null
+  #   outbound-bind-ipv4: null
+  #   outbound-bind-ipv6: null
+  #   outbound: null
+
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # 5. Shadowsocks 2022
+  # ════════════════════════════════════════════════════════════════════════════
+  # method 取值：
+  #   2022-blake3-aes-128-gcm
+  #   2022-blake3-aes-256-gcm          # 默认
+  #   2022-blake3-chacha20-poly1305
+  #
+  # - name: ss-main
+  #   type: shadowsocks
+  #   listen: "0.0.0.0"
+  #   port: 8388
+  #   password: your-ss2022-password
+  #   method: 2022-blake3-aes-256-gcm
+  #   transport:
+  #     type: tcp
+  #     ws-path: /
+  #     ws-host: null
+  #     ws-max-early-data: 0
+  #     ws-early-data-header-name: null
+  #     ws-headers: null
+  #     xhttp-path: /
+  #     xhttp-host: null
+  #   tls: null                   # 可选套 TLS
+  #   # tls:
+  #   #   cert-path: /etc/ssl/certs/server.crt
+  #   #   key-path: /etc/ssl/private/server.key
+  #   outbound-bind-ipv4: null
+  #   outbound-bind-ipv6: null
+  #   outbound: null
+
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # 6. TUIC
+  # ════════════════════════════════════════════════════════════════════════════
+  # users 为列表（uuid + password），不再使用 map
+  # 时间字段支持 humantime：10s / 3s / 30s 等
+  #
+  # - name: tuic-main
+  #   type: tuic
+  #   listen: "0.0.0.0"
+  #   port: 443
+  #   users:
+  #     - uuid: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+  #       password: pass1
+  #     - uuid: yyyyyyyy-yyyy-yyyy-yyyy-yyyyyyyyyyyy
+  #       password: pass2
+  #   tls:
+  #     cert-path: /etc/ssl/certs/server.crt
+  #     key-path: /etc/ssl/private/server.key
+  #     self-signed-domain: null
+  #   max-idle-time: 3s
+  #   auth-timeout: 3s
+  #   udp-timeout: 30s
+  #   heartbeat: 10s
+  #   udp-relay-ipv6: false
+  #   max-udp-packet-size: 65535
+  #   outbound-bind-ipv4: null
+  #   outbound-bind-ipv6: null
+  #   outbound: null
+
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # 7. WireGuard
+  # ════════════════════════════════════════════════════════════════════════════
+  # 生成密钥：flux generate wg-keypair（若支持）
+  # 注意：本协议不支持 outbound-bind-* / outbound
+  #
+  # - name: wg-main
+  #   type: wireguard
+  #   listen: "0.0.0.0"
+  #   port: 51820
+  #   private-key: SERVER_PRIVATE_KEY_BASE64
+  #   server-address:                 # 服务端在隧道内的地址
+  #     - "10.0.0.1/24"
+  #     - "fd00::1/64"
+  #   mtu: 1420
+  #   peers:
+  #     - public-key: CLIENT_PUBLIC_KEY_BASE64
+  #       pre-shared-key: null        # 可选
+  #       allowed-ips:
+  #         - "10.0.0.2/32"
+  #         - "fd00::2/128"
+  #       keepalive-interval: 25      # 秒，可选
+  #       dns:                        # 可选，下发给对端的 DNS
+  #         - "1.1.1.1"
+  #         - "8.8.8.8"
+
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # 8. AnyTLS
+  # ════════════════════════════════════════════════════════════════════════════
+  # - name: anytls-main
+  #   type: anytls
+  #   listen: "0.0.0.0"
+  #   port: 443
+  #   password: your-anytls-password
+  #   tls:
+  #     cert-path: /etc/ssl/certs/server.crt
+  #     key-path: /etc/ssl/private/server.key
+  #     self-signed-domain: null
+  #   padding-scheme: null            # 可选填充方案字符串
+  #   outbound-bind-ipv4: null
+  #   outbound-bind-ipv6: null
+  #   outbound: null
+
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # 9. SOCKS5
+  # ════════════════════════════════════════════════════════════════════════════
+  # users 留空 = 无认证
+  #
+  # - name: socks-in
+  #   type: socks
+  #   listen: "127.0.0.1"
+  #   port: 1080
+  #   users:
+  #     - username: u1
+  #       password: p1
+  #     - username: u2
+  #       password: p2
+  #   outbound-bind-ipv4: null
+  #   outbound-bind-ipv6: null
+  #   outbound: null
+
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # 10. HTTP CONNECT 代理
+  # ════════════════════════════════════════════════════════════════════════════
+  # users 留空 = 无认证；配置后要求 Proxy-Authorization: Basic
+  # tls 可选（HTTPS 代理）
+  #
+  # - name: http-in
+  #   type: http
+  #   listen: "0.0.0.0"
+  #   port: 8080
+  #   users:
+  #     - username: u1
+  #       password: p1
+  #   tls: null
+  #   # tls:
+  #   #   cert-path: /etc/ssl/certs/server.crt
+  #   #   key-path: /etc/ssl/private/server.key
+  #   outbound-bind-ipv4: null
+  #   outbound-bind-ipv6: null
+  #   outbound: null
+
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # 11. NaiveProxy（HTTP/2 CONNECT + Basic Auth）
+  # ════════════════════════════════════════════════════════════════════════════
+  # padding：双方都支持才生效；建议连通后再开
+  #
+  # - name: naive-main
+  #   type: naiveproxy
+  #   listen: "0.0.0.0"
+  #   port: 443
+  #   users:
+  #     - username: u1
+  #       password: p1
+  #   tls:
+  #     cert-path: /etc/ssl/certs/server.crt
+  #     key-path: /etc/ssl/private/server.key
+  #     self-signed-domain: null
+  #   masquerade: null
+  #   # masquerade:
+  #   #   url: "https://example.com"
+  #   #   rewrite-host: true
+  #   padding: false
+  #   outbound-bind-ipv4: null
+  #   outbound-bind-ipv6: null
+  #   outbound: null
+
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # 12. ShadowQuic（0-RTT QUIC + JLS SNI 伪装）
+  # ════════════════════════════════════════════════════════════════════════════
+  # jls-upstream 必须是真实 HTTPS 站点；未认证流量转发到该上游
+  # congestion-control: bbr | cubic | new-reno | brutal
+  #
+  # - name: sq-in
+  #   type: shadowquic
+  #   listen: "0.0.0.0"
+  #   port: 443
+  #   users:
+  #     - username: user1
+  #       password: pass1
+  #   jls-upstream: "google.com:443"
+  #   server-name: "google.com"       # 留空则从 jls-upstream 推断
+  #   alpn: ["h3"]
+  #   zero-rtt: true
+  #   congestion-control: bbr
+  #   initial-mtu: 1300
+  #   min-mtu: 1290
+  #   gso: true
+  #   mtu-discovery: true
+  #   blackhole-detection: false
+  #   udp-relay-ipv6: false
+  #   udp-timeout: 30s
+  #   outbound-bind-ipv4: null
+  #   outbound-bind-ipv6: null
+  #   outbound: null
+
+
+  # ── 最小可运行示例（请改密码后使用；或注释掉并启用上方某一完整块）──────────
+  - name: hy2-demo
+    type: hysteria2
+    listen: "0.0.0.0"
+    port: 443
+    tls:
+      self-signed-domain: hy2.example.com
+    auth:
+      type: password
+      password: change-me
