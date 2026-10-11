@@ -80,7 +80,7 @@ async fn main() -> Result<()> {
         );
     }
 
-    // name uniqueness is checked in config::load
+    // name uniqueness is checked in config::load_with_base
 
     let mut handles = Vec::new();
 
@@ -108,7 +108,7 @@ async fn main() -> Result<()> {
                 let c = Arc::new(c);
                 info!(
                     "[{tag}] vless, listen: {}, transport={}, tls={tls_label}",
-                    config::format_listen(&c.listen, c.port), c.transport.r#type,
+                    config::format_listen(&c.listen, c.port), c.transport.kind,
                 );
                 handles.push(tokio::spawn(async move {
                     if let Err(e) = vless::listener::run(c).await {
@@ -122,7 +122,7 @@ async fn main() -> Result<()> {
                 let c = Arc::new(c);
                 info!(
                     "[{tag}] vmess, listen: {}, transport={}",
-                    config::format_listen(&c.listen, c.port), c.transport.r#type
+                    config::format_listen(&c.listen, c.port), c.transport.kind
                 );
                 handles.push(tokio::spawn(async move {
                     if let Err(e) = vmess::run(c).await {
@@ -136,7 +136,7 @@ async fn main() -> Result<()> {
                 let c = Arc::new(c);
                 info!(
                     "[{tag}] trojan, listen: {}, transport={}",
-                    config::format_listen(&c.listen, c.port), c.transport.r#type
+                    config::format_listen(&c.listen, c.port), c.transport.kind
                 );
                 handles.push(tokio::spawn(async move {
                     if let Err(e) = trojan::run(c).await {
@@ -150,7 +150,7 @@ async fn main() -> Result<()> {
                 let c = Arc::new(c);
                 info!(
                     "[{tag}] shadowsocks, listen: {}, method={:?}, transport={}",
-                    config::format_listen(&c.listen, c.port), c.method, c.transport.r#type,
+                    config::format_listen(&c.listen, c.port), c.method, c.transport.kind,
                 );
                 handles.push(tokio::spawn(async move {
                     if let Err(e) = shadowsocks::server::run(c).await {
@@ -223,7 +223,7 @@ async fn main() -> Result<()> {
                 } else {
                     "password"
                 };
-                let tls_label = if c.tls.is_some() { "tls" } else { "plain" };
+                let tls_label = if c.tls.is_set() { "tls" } else { "plain" };
                 let c = Arc::new(c);
                 info!(
                     "[{tag}] http, listen: {}, auth={auth_label}, tls={tls_label}",
