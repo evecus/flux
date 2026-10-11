@@ -98,7 +98,7 @@ async fn handle_tcp(
     dst: &str,
     cfg: &ShadowquicConfig,
 ) -> Result<()> {
-    let outbound = Outbound::new(cfg.outbound_bind_ipv4, cfg.outbound_bind_ipv6, &cfg.outbound);
+    let outbound = Outbound::new(&cfg.outbound);
     let mut upstream = crate::common::outbound::dial_tcp(dst, &outbound)
         .await
         .with_context(|| format!("dial tcp {dst}"))?;
@@ -127,7 +127,7 @@ async fn handle_tcp(
 // ── UDP ──────────────────────────────────────────────────────────────────────
 
 async fn handle_udp(udp_session: shadowquic::UdpSession, cfg: &ShadowquicConfig) -> Result<()> {
-    let outbound = Outbound::new(cfg.outbound_bind_ipv4, cfg.outbound_bind_ipv6, &cfg.outbound);
+    let outbound = Outbound::new(&cfg.outbound);
     let upstream = Arc::new(UdpPair::bind(&outbound, cfg).await?);
 
     // DNS 反向映射：resolved SocketAddr -> 原始 SocksAddr
@@ -235,10 +235,10 @@ impl UdpPair {
         match outbound {
             Outbound::Direct(_) => {
                 let socket_v4 =
-                    create_udp_socket(cfg.outbound_bind_ipv4).context("create udp v4 socket")?;
+                    create_udp_socket(cfg.outbound.outbound_bind_ipv4).context("create udp v4 socket")?;
                 let socket_v6 = if cfg.udp_relay_ipv6 {
                     Some(
-                        create_udp_socket_v6(cfg.outbound_bind_ipv6)
+                        create_udp_socket_v6(cfg.outbound.outbound_bind_ipv6)
                             .context("create udp v6 socket")?,
                     )
                 } else {
@@ -372,10 +372,7 @@ async fn resolve_socks_addr(
 
 /// 将 flux `ShadowquicConfig` 转换为 shadowquic crate `ShadowQuicServerCfg`。
 fn build_sq_server_cfg(cfg: &ShadowquicConfig) -> Result<ShadowQuicServerCfg> {
-    let bind_addr: SocketAddr = cfg
-        .listen
-        .parse()
-        .with_context(|| format!("invalid listen address: {}", cfg.listen))?;
+    let bind_addr: SocketAddr = crate::config::join_listen_addr(&cfg.listen, cfg.port)?;
 
     let users: Vec<AuthUser> = cfg
         .users
