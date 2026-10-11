@@ -53,9 +53,9 @@ async fn main() -> Result<()> {
         }
     }
 
-    let config_path = parse_config_arg();
+    let (config_path, base_dir) = resolve_config_paths()?;
 
-    let cfg = config::load(&config_path)
+    let cfg = config::load_with_base(&config_path, Some(base_dir.as_path()))
         .with_context(|| format!("failed to load config: {config_path}"))?;
 
     let level = cfg.log_level.trim();
@@ -72,7 +72,7 @@ async fn main() -> Result<()> {
         .compact()
         .init();
 
-    info!("flux starting, config: {config_path}");
+    info!("flux starting, config: {config_path}, base-dir: {}", base_dir.display());
 
     if cfg.is_empty() {
         anyhow::bail!(
@@ -281,16 +281,88 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn parse_config_arg() -> String {
+/// Resolve `-c` / `-d` into (config_path, base_dir).
+///
+/// - `flux -d /path`           → config `/path/config.yaml`, base `/path`
+/// - `flux -d /path -c a.yaml` → config `/path/a.yaml` (if relative), base `/path`
+/// - `flux -c /abs/c.yaml`     → config absolute, base = parent dir
+/// - `flux -c ./c.yaml`        → resolved against cwd, base = parent of config
+///
+/// Relative `cert-path` / `key-path` in the config are resolved against `base_dir`.
+fn resolve_config_paths() -> Result<(String, std::path::PathBuf)> {
+    use std::path::PathBuf;
     let args: Vec<String> = std::env::args().collect();
+    let mut config_arg: Option<String> = None;
+    let mut dir_arg: Option<PathBuf> = None;
     let mut i = 1;
     while i < args.len() {
-        if args[i] == "-c" {
-            if let Some(path) = args.get(i + 1) {
-                return path.clone();
+        match args[i].as_str() {
+            "-c" | "--config" => {
+                if let Some(p) = args.get(i + 1) {
+                    config_arg = Some(p.clone());
+                    i += 2;
+                    continue;
+                }
             }
+            "-d" | "--dir" | "--directory" => {
+                if let Some(p) = args.get(i + 1) {
+                    dir_arg = Some(PathBuf::from(p));
+                    i += 2;
+                    continue;
+                }
+            }
+            _ => {}
         }
         i += 1;
     }
-    "config.yaml".to_string()
+
+    if let Some(dir) = dir_arg {
+        let dir = if dir.is_absolute() {
+            dir
+        } else {
+            std::env::current_dir()
+                .context("get current dir")?
+                .join(dir)
+        };
+        if !dir.is_dir() {
+            anyhow::bail!("-d path is not a directory: {}", dir.display());
+        }
+        let cfg = match config_arg {
+            Some(c) => {
+                let p = PathBuf::from(&c);
+                if p.is_absolute() {
+                    p
+                } else {
+                    dir.join(p)
+                }
+            }
+            None => dir.join("config.yaml"),
+        };
+        Ok((cfg.to_string_lossy().into_owned(), dir))
+    } else {
+        let cfg = match config_arg {
+            Some(c) => {
+                let p = PathBuf::from(&c);
+                if p.is_absolute() {
+                    p
+                } else {
+                    std::env::current_dir()
+                        .context("get current dir")?
+                        .join(p)
+                }
+            }
+            None => {
+                std::env::current_dir()
+                    .context("get current dir")?
+                    .join("config.yaml")
+            }
+        };
+        let base = cfg
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."));
+        Ok((cfg.to_string_lossy().into_owned(), base))
+    }
 }
+

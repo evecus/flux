@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Deserializer, Serialize};
-use std::{collections::HashMap, path::Path, time::Duration};
+use std::{collections::HashMap, path::{Path, PathBuf}, time::Duration};
 use uuid::Uuid;
 
 use crate::common::tls::config::StandardTlsConfig;
@@ -863,10 +863,103 @@ fn default_xhttp_path() -> String {
     "/".to_string()
 }
 
+/// Resolve a filesystem path against `base_dir`.
+/// Absolute paths and `file:` / `file://` prefixes are kept absolute;
+/// relative paths join `base_dir` (config file directory / `-d`).
+pub fn resolve_fs_path(path: &str, base_dir: &Path) -> String {
+    let raw = path.trim();
+    let stripped = raw
+        .strip_prefix("file://")
+        .or_else(|| raw.strip_prefix("file:"))
+        .unwrap_or(raw);
+    let p = Path::new(stripped);
+    if p.is_absolute() {
+        stripped.to_string()
+    } else {
+        base_dir.join(p).to_string_lossy().into_owned()
+    }
+}
+
+fn resolve_opt_path(path: &mut Option<String>, base_dir: &Path) {
+    if let Some(ref mut p) = path {
+        *p = resolve_fs_path(p, base_dir);
+    }
+}
+
+fn resolve_standard_tls(tls: &mut crate::common::tls::config::StandardTlsConfig, base: &Path) {
+    resolve_opt_path(&mut tls.cert_path, base);
+    resolve_opt_path(&mut tls.key_path, base);
+}
+
+impl Config {
+    /// Resolve relative cert/key paths against `base_dir`.
+    pub fn resolve_paths(&mut self, base_dir: &Path) {
+        for node in &mut self.nodes {
+            match &mut node.inner {
+                NodeInner::Hysteria2(c) => {
+                    resolve_opt_path(&mut c.tls.cert_path, base_dir);
+                    resolve_opt_path(&mut c.tls.key_path, base_dir);
+                }
+                NodeInner::Vless(c) => {
+                    if let Some(VlessTlsConfig::Tls { standard }) = &mut c.tls {
+                        resolve_standard_tls(standard, base_dir);
+                    }
+                }
+                NodeInner::Vmess(c) => {
+                    if let Some(tls) = &mut c.tls {
+                        resolve_standard_tls(tls, base_dir);
+                    }
+                }
+                NodeInner::Trojan(c) => {
+                    if let Some(tls) = &mut c.tls {
+                        resolve_standard_tls(tls, base_dir);
+                    }
+                }
+                NodeInner::Shadowsocks(c) => {
+                    if let Some(tls) = &mut c.tls {
+                        resolve_standard_tls(tls, base_dir);
+                    }
+                }
+                NodeInner::Tuic(c) => {
+                    if let Some(tls) = &mut c.tls {
+                        resolve_standard_tls(tls, base_dir);
+                    }
+                }
+                NodeInner::Anytls(c) => {
+                    resolve_standard_tls(&mut c.tls, base_dir);
+                }
+                NodeInner::Http(c) => {
+                    if let Some(tls) = &mut c.tls {
+                        resolve_standard_tls(tls, base_dir);
+                    }
+                }
+                NodeInner::Naiveproxy(c) => {
+                    resolve_standard_tls(&mut c.tls, base_dir);
+                }
+                NodeInner::Socks(_) | NodeInner::Wireguard(_) | NodeInner::Shadowquic(_) => {}
+            }
+        }
+    }
+}
+
 pub fn load(path: &str) -> Result<Config> {
-    let content = std::fs::read_to_string(Path::new(path))
+    load_with_base(path, None)
+}
+
+/// Load YAML config. Relative cert/key paths resolve against `base_dir`
+/// (or the config file's parent directory when `base_dir` is `None`).
+pub fn load_with_base(path: &str, base_dir: Option<&Path>) -> Result<Config> {
+    let path_buf = PathBuf::from(path);
+    let derived_base = path_buf
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let base = base_dir.unwrap_or(derived_base.as_path());
+
+    let content = std::fs::read_to_string(&path_buf)
         .with_context(|| format!("cannot read config file: {path}"))?;
-    let cfg: Config =
+    let mut cfg: Config =
         serde_yaml::from_str(&content).with_context(|| format!("invalid YAML in {path}"))?;
     if let Some(dup) = cfg.check_duplicate_names() {
         anyhow::bail!("duplicate node name `{dup}`");
@@ -876,5 +969,6 @@ pub fn load(path: &str) -> Result<Config> {
             anyhow::bail!("node name must not be empty");
         }
     }
+    cfg.resolve_paths(base);
     Ok(cfg)
 }
