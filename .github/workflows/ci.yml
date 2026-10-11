@@ -35,7 +35,7 @@ jobs:
             ${{ runner.os }}-cargo-check-
 
       - name: cargo clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets --all-features -- -D warnings --locked
 
   build:
     name: Build (${{ matrix.target }})
@@ -84,7 +84,7 @@ jobs:
 
       - name: Build (cross)
         if: matrix.cross
-        run: cross build --release --target ${{ matrix.target }}
+        run: cross build --release --target ${{ matrix.target }} --locked
 
       - name: Rename
         run: |
