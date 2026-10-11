@@ -67,7 +67,7 @@ pub async fn run(cfg: Arc<ShadowsocksConfig>) -> Result<()> {
     let master_key = Arc::new(decode_master_key(&cfg.password, key_len)?);
     let salt_cache = Arc::new(SaltCache::new(SALT_CACHE_WINDOW_SECS));
 
-    let tls_acceptor: Option<Arc<TlsAcceptor>> = if let Some(tls_cfg) = &cfg.tls {
+    let tls_acceptor: Option<Arc<TlsAcceptor>> = if let Some(tls_cfg) = cfg.tls.as_opt() {
         let sc = shared_tls::build(
             tls_cfg.cert_path.as_deref(),
             tls_cfg.key_path.as_deref(),
@@ -78,20 +78,20 @@ pub async fn run(cfg: Arc<ShadowsocksConfig>) -> Result<()> {
         None
     };
 
-    let addr: SocketAddr = cfg.listen.parse()?;
+    let addr: SocketAddr = crate::config::join_listen_addr(&cfg.listen, cfg.port)?;
     let listener = TcpListener::bind(addr).await?;
     info!(
         "[shadowsocks] listening on {addr} (method={:?}, transport={}, tls={})",
         cfg.method,
-        cfg.transport.r#type,
+        cfg.transport.kind,
         if tls_acceptor.is_some() { "yes" } else { "no" },
     );
 
     // ── xhttp：server 级别 session 表 ─────────────────────────────────────────
-    if cfg.transport.r#type == "xhttp" {
+    if cfg.transport.kind == "xhttp" {
         let xh_cfg = XhttpConfig {
-            path: cfg.transport.xhttp_path.clone(),
-            host: cfg.transport.xhttp_host.clone(),
+            path: cfg.transport.path.clone(),
+            host: cfg.transport.host.clone(),
         };
         let xhttp_server = XhttpServer::new(xh_cfg);
         let key2 = Arc::clone(&master_key);
@@ -175,7 +175,7 @@ async fn handle_conn(
     salt_cache: &SaltCache,
     tls_acceptor: Option<Arc<TlsAcceptor>>,
 ) -> Result<()> {
-    let transport = cfg.transport.r#type.as_str();
+    let transport = cfg.transport.kind.as_str();
 
     match (transport, tls_acceptor) {
         ("tcp", None) => process(stream, peer, cfg, master_key, salt_cache).await,
@@ -235,7 +235,7 @@ where
 
     // Step 5: 拨号出站
     let outbound_cfg =
-        shared_net::Outbound::new(cfg.outbound_bind_ipv4, cfg.outbound_bind_ipv6, &cfg.outbound);
+        shared_net::Outbound::new(&cfg.outbound);
     let outbound = shared_net::dial_tcp_timeout(
         &target,
         &outbound_cfg,
