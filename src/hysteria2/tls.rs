@@ -13,10 +13,10 @@ use std::fs::File;
 use std::io::BufReader;
 use tracing::info;
 
-use crate::config::Hy2TlsConfig;
+use crate::common::tls::config::StandardTlsConfig;
 
 /// Build rustls ServerConfig for Hysteria2 (QUIC, ALPN = "h3").
-pub fn build_hy2_tls(cfg: &Hy2TlsConfig) -> Result<ServerConfig> {
+pub fn build_hy2_tls(cfg: &StandardTlsConfig) -> Result<ServerConfig> {
     let (cert_chain, private_key) = match (&cfg.cert_path, &cfg.key_path) {
         (Some(cert_path), Some(key_path)) => {
             info!("[hy2/tls] Loading cert: {cert_path}");

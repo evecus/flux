@@ -42,7 +42,7 @@ use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, info, warn};
 
 use crate::common::outbound::Outbound;
-use crate::config::{AuthConfig, Hysteria2Config};
+use crate::config::Hysteria2Config;
 use crate::hysteria2::auth::{gen_padding, read_tcp_request};
 use crate::hysteria2::congestion::BrutalFactory;
 use crate::hysteria2::proxy::{handle_tcp_stream, handle_udp_session, parse_udp_frame, UdpFrame};
@@ -82,7 +82,7 @@ pub async fn run(cfg: Arc<Hysteria2Config>) -> Result<()> {
         );
     } else {
         info!(
-            "[hy2] Congestion: Brutal @ {} Mbps upload (default, [node.bandwidth] not set — configure it for best performance)",
+            "[hy2] Congestion: Brutal @ {} Mbps upload (default, `up` not set — configure it for best performance)",
             bps * 8 / 1_000_000
         );
     }
@@ -104,7 +104,7 @@ pub async fn run(cfg: Arc<Hysteria2Config>) -> Result<()> {
     ));
     server_config.transport_config(Arc::new(transport));
 
-    let addr: SocketAddr = cfg.listen.parse()?;
+    let addr: SocketAddr = crate::config::join_listen_addr(&cfg.listen, cfg.port)?;
     let endpoint = quinn::Endpoint::server(server_config, addr)?;
     info!("[hy2] Listening on {}", endpoint.local_addr()?);
 
@@ -165,14 +165,11 @@ async fn handle_connection(incoming: quinn::Incoming, cfg: Arc<Hysteria2Config>)
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(0);
 
-                    let ok = match &cfg.auth {
-                        AuthConfig::Password { password } => auth_val == *password,
-                        AuthConfig::None => true,
-                    };
+                    let ok = auth_val == cfg.password;
 
                     if ok {
                         // 计算 cc-rx：告知客户端服务端接收带宽（下行速率，bps）。
-                        // down_bps() 始终返回 Some：显式配置了 [node.bandwidth].down 则用该值，
+                        // down_bps() 始终返回 Some：显式配置了 `down` 则用该值，
                         // 否则回退到 BandwidthConfig 内置的保守默认值（不会再是 0/不限制）。
                         let cc_rx = cfg
                             .bandwidth
@@ -234,7 +231,7 @@ async fn handle_connection(incoming: quinn::Incoming, cfg: Arc<Hysteria2Config>)
     // 不会再发普通 H3 请求，可以安全忽略。
 
     let session_map: SessionMap = Arc::new(Mutex::new(HashMap::new()));
-    let outbound = Outbound::new(cfg.outbound_bind_ipv4, cfg.outbound_bind_ipv6, &cfg.outbound);
+    let outbound = Outbound::new(&cfg.outbound);
 
     // 循环 A：QUIC 层——统一接收 bidi stream，处理 TCP 代理流
     let tcp_task = {
@@ -382,15 +379,9 @@ async fn masquerade<S>(
 ) where
     S: h3::quic::BidiStream<Bytes>,
 {
-    let resp = match cfg.masquerade.r#type.as_str() {
-        "proxy" => {
-            if let Some(proxy_cfg) = &cfg.masquerade.proxy {
-                masquerade_proxy(req, &proxy_cfg.url, proxy_cfg.rewrite_host).await
-            } else {
-                masquerade_404()
-            }
-        }
-        _ => masquerade_404(),
+    let resp = match &cfg.masquerade.masquerade_url {
+        Some(url) => masquerade_proxy(req, url, cfg.masquerade.masquerade_rewrite_host).await,
+        None => masquerade_404(),
     };
 
     // send_response 只发 headers frame
