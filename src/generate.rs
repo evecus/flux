@@ -55,7 +55,7 @@ pub fn wireguard_keypair() -> Result<()> {
 
     println!("=== WireGuard 密钥对 ===");
     println!();
-    println!("# ── 服务端（填入 flux config.toml）──");
+    println!("# ── 服务端（填入 flux config.yaml）──");
     println!("[wireguard]");
     println!("private_key    = \"{server_priv_b64}\"");
     println!("# 对应公钥（填入客户端 wg0.conf [Peer] PublicKey）：");
@@ -73,7 +73,7 @@ pub fn wireguard_keypair() -> Result<()> {
     println!("AllowedIPs          = 0.0.0.0/0, ::/0");
     println!("PersistentKeepalive = 25");
     println!();
-    println!("# ── 将客户端公钥填入服务端 config.toml ──");
+    println!("# ── 将客户端公钥填入服务端 config.yaml ──");
     println!("[[wireguard.peers]]");
     println!("public_key  = \"{client_pub_b64}\"");
     println!("allowed_ips = [\"10.0.0.2/32\"]");
@@ -102,7 +102,7 @@ pub fn reality_keypair() -> Result<()> {
 
     println!("=== Reality 密钥对 ===");
     println!();
-    println!("# ── 服务端（填入 flux config.toml）──────────────────────────────");
+    println!("# ── 服务端（填入 flux config.yaml）──────────────────────────────");
     println!("# 注意：服务端只需 private_key，public_key 仅客户端使用");
     println!("[[vless]]");
     println!("listen = \"0.0.0.0:443\"");

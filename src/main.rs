@@ -58,7 +58,14 @@ async fn main() -> Result<()> {
     let cfg = config::load(&config_path)
         .with_context(|| format!("failed to load config: {config_path}"))?;
 
-    let filter = EnvFilter::try_new(&cfg.log.level).unwrap_or_else(|_| EnvFilter::new("info"));
+    let level = cfg.log_level.trim();
+    let filter = if level.eq_ignore_ascii_case("off") {
+        EnvFilter::new("off")
+    } else {
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+            EnvFilter::try_new(level).unwrap_or_else(|_| EnvFilter::new("info"))
+        })
+    };
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)
@@ -69,26 +76,21 @@ async fn main() -> Result<()> {
 
     if cfg.is_empty() {
         anyhow::bail!(
-            "no nodes configured — add at least one [[node]] section with type = \"vless\" / \
-             \"vmess\" / \"trojan\" / \"shadowsocks\" / \"hysteria2\" / \"tuic\" / \
-             \"wireguard\" / \"anytls\" / \"socks\" / \"http\" / \"naiveproxy\" / \"shadowquic\""
+            "no nodes configured — add at least one entry under `nodes:`              (type: vless / vmess / trojan / shadowsocks / hysteria2 / tuic /              wireguard / anytls / socks / http / naiveproxy / shadowquic)"
         );
     }
 
-    // ── tag 唯一性校验 ────────────────────────────────────────────────────────
-    if let Some(dup) = cfg.check_duplicate_tags() {
-        anyhow::bail!("duplicate node tag: \"{dup}\" — each [[node]] must have a unique tag");
-    }
+    // name uniqueness is checked in config::load
 
     let mut handles = Vec::new();
 
-    for node in cfg.node {
-        let tag = node.tag.clone();
+    for node in cfg.nodes {
+        let tag = node.name.clone();
         match node.inner {
             // ── Hysteria2 ─────────────────────────────────────────────────────
             config::NodeInner::Hysteria2(c) => {
                 let c = Arc::new(c);
-                info!("[{tag}] hysteria2, listen: {}", c.listen);
+                info!("[{tag}] hysteria2, listen: {}", config::format_listen(&c.listen, c.port));
                 handles.push(tokio::spawn(async move {
                     if let Err(e) = hysteria2::server::run(c).await {
                         tracing::error!("[{tag}] server exited: {e:#}");
@@ -106,7 +108,7 @@ async fn main() -> Result<()> {
                 let c = Arc::new(c);
                 info!(
                     "[{tag}] vless, listen: {}, transport={}, tls={tls_label}",
-                    c.listen, c.transport.r#type,
+                    config::format_listen(&c.listen, c.port), c.transport.r#type,
                 );
                 handles.push(tokio::spawn(async move {
                     if let Err(e) = vless::listener::run(c).await {
@@ -120,7 +122,7 @@ async fn main() -> Result<()> {
                 let c = Arc::new(c);
                 info!(
                     "[{tag}] vmess, listen: {}, transport={}",
-                    c.listen, c.transport.r#type
+                    config::format_listen(&c.listen, c.port), c.transport.r#type
                 );
                 handles.push(tokio::spawn(async move {
                     if let Err(e) = vmess::run(c).await {
@@ -134,7 +136,7 @@ async fn main() -> Result<()> {
                 let c = Arc::new(c);
                 info!(
                     "[{tag}] trojan, listen: {}, transport={}",
-                    c.listen, c.transport.r#type
+                    config::format_listen(&c.listen, c.port), c.transport.r#type
                 );
                 handles.push(tokio::spawn(async move {
                     if let Err(e) = trojan::run(c).await {
@@ -148,7 +150,7 @@ async fn main() -> Result<()> {
                 let c = Arc::new(c);
                 info!(
                     "[{tag}] shadowsocks, listen: {}, method={:?}, transport={}",
-                    c.listen, c.method, c.transport.r#type,
+                    config::format_listen(&c.listen, c.port), c.method, c.transport.r#type,
                 );
                 handles.push(tokio::spawn(async move {
                     if let Err(e) = shadowsocks::server::run(c).await {
@@ -162,7 +164,7 @@ async fn main() -> Result<()> {
                 let c = Arc::new(c);
                 info!(
                     "[{tag}] tuic, listen: {}, users: {}",
-                    c.listen,
+                    config::format_listen(&c.listen, c.port),
                     c.users.len()
                 );
                 handles.push(tokio::spawn(async move {
@@ -177,7 +179,7 @@ async fn main() -> Result<()> {
                 let c = Arc::new(c);
                 info!(
                     "[{tag}] wireguard, listen: {}, peers: {}",
-                    c.listen,
+                    config::format_listen(&c.listen, c.port),
                     c.peers.len()
                 );
                 handles.push(tokio::spawn(async move {
@@ -190,7 +192,7 @@ async fn main() -> Result<()> {
             // ── AnyTLS ────────────────────────────────────────────────────────
             config::NodeInner::Anytls(c) => {
                 let c = Arc::new(c);
-                info!("[{tag}] anytls, listen: {}", c.listen);
+                info!("[{tag}] anytls, listen: {}", config::format_listen(&c.listen, c.port));
                 handles.push(tokio::spawn(async move {
                     if let Err(e) = anytls::server::run(c).await {
                         tracing::error!("[{tag}] server exited: {e:#}");
@@ -206,7 +208,7 @@ async fn main() -> Result<()> {
                     "password"
                 };
                 let c = Arc::new(c);
-                info!("[{tag}] socks5, listen: {}, auth={auth_label}", c.listen);
+                info!("[{tag}] socks5, listen: {}, auth={auth_label}", config::format_listen(&c.listen, c.port));
                 handles.push(tokio::spawn(async move {
                     if let Err(e) = socks::run(c).await {
                         tracing::error!("[{tag}] server exited: {e:#}");
@@ -225,7 +227,7 @@ async fn main() -> Result<()> {
                 let c = Arc::new(c);
                 info!(
                     "[{tag}] http, listen: {}, auth={auth_label}, tls={tls_label}",
-                    c.listen
+                    config::format_listen(&c.listen, c.port)
                 );
                 handles.push(tokio::spawn(async move {
                     if let Err(e) = http::run(c).await {
@@ -239,7 +241,7 @@ async fn main() -> Result<()> {
                 let c = Arc::new(c);
                 info!(
                     "[{tag}] naiveproxy, listen: {}, users: {}, padding={}",
-                    c.listen,
+                    config::format_listen(&c.listen, c.port),
                     c.users.len(),
                     c.padding,
                 );
@@ -255,7 +257,7 @@ async fn main() -> Result<()> {
                 let c = Arc::new(c);
                 info!(
                     "[{tag}] shadowquic, listen: {}, users: {}, jls_upstream: {}",
-                    c.listen,
+                    config::format_listen(&c.listen, c.port),
                     c.users.len(),
                     c.jls_upstream,
                 );
@@ -290,5 +292,5 @@ fn parse_config_arg() -> String {
         }
         i += 1;
     }
-    "config.toml".to_string()
+    "config.yaml".to_string()
 }

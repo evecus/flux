@@ -32,28 +32,57 @@ where
     one_or_many(d)
 }
 
+/// Build `SocketAddr` from split `listen` + `port`.
+/// Bare IPv6 hosts (containing `:`) are bracketed: `::` + 443 → `[::]:443`.
+pub fn join_listen_addr(listen: &str, port: u16) -> Result<std::net::SocketAddr> {
+    let s = listen.trim();
+    let joined = if s.starts_with('[') {
+        format!("{s}:{port}")
+    } else if s.contains(':') {
+        format!("[{s}]:{port}")
+    } else {
+        format!("{s}:{port}")
+    };
+    joined
+        .parse()
+        .with_context(|| format!("invalid listen address `{joined}`"))
+}
+
+pub fn format_listen(listen: &str, port: u16) -> String {
+    let s = listen.trim();
+    if s.starts_with('[') {
+        format!("{s}:{port}")
+    } else if s.contains(':') {
+        format!("[{s}]:{port}")
+    } else {
+        format!("{s}:{port}")
+    }
+}
+
 // ── Top-level config ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub struct Config {
-    #[serde(default)]
-    pub log: LogConfig,
+    /// Top-level log level: error | warn | info | debug | trace | off
+    #[serde(default = "default_log_level")]
+    pub log_level: String,
 
-    #[serde(default, deserialize_with = "one_or_many_opt")]
-    pub node: Vec<NodeConfig>,
+    #[serde(default)]
+    pub nodes: Vec<NodeConfig>,
 }
 
 impl Config {
     pub fn is_empty(&self) -> bool {
-        self.node.is_empty()
+        self.nodes.is_empty()
     }
 
-    /// 校验所有 tag 唯一，返回第一个重复的 tag
-    pub fn check_duplicate_tags(&self) -> Option<&str> {
+    /// 校验所有 name 唯一，返回第一个重复的 name
+    pub fn check_duplicate_names(&self) -> Option<&str> {
         let mut seen = std::collections::HashSet::new();
-        for n in &self.node {
-            if !seen.insert(n.tag.as_str()) {
-                return Some(&n.tag);
+        for n in &self.nodes {
+            if !seen.insert(n.name.as_str()) {
+                return Some(&n.name);
             }
         }
         None
@@ -62,10 +91,10 @@ impl Config {
 
 // ── Node（顶层统一入口）──────────────────────────────────────────────────────
 
-/// `[[node]]` 块，tag 必填，type 决定协议
+/// `nodes:` 列表项，name 必填，type 决定协议
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct NodeConfig {
-    pub tag: String,
+    pub name: String,
 
     #[serde(flatten)]
     pub inner: NodeInner,
@@ -129,14 +158,17 @@ impl OutboundConfig {
 // ── SOCKS5 ────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub struct SocksUser {
     pub username: String,
     pub password: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub struct SocksConfig {
     pub listen: String,
+    pub port: u16,
     #[serde(default, deserialize_with = "one_or_many_opt")]
     pub users: Vec<SocksUser>,
     /// 出站时绑定的本地 IPv4 出口 IP（多公网 IP 服务器场景）。
@@ -158,9 +190,18 @@ pub struct SocksConfig {
 // ── TUIC ──────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct TuicUser {
+    pub uuid: Uuid,
+    pub password: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub struct TuicConfig {
     pub listen: String,
-    pub users: HashMap<Uuid, String>,
+    pub port: u16,
+    pub users: Vec<TuicUser>,
     pub tls: Option<StandardTlsConfig>,
     #[serde(default = "default_tuic_idle_time", with = "humantime_serde")]
     pub max_idle_time: Duration,
@@ -209,11 +250,22 @@ fn default_tuic_max_udp_packet_size() -> usize {
     65535
 }
 
+impl TuicConfig {
+    pub fn users_map(&self) -> HashMap<Uuid, String> {
+        self.users
+            .iter()
+            .map(|u| (u.uuid, u.password.clone()))
+            .collect()
+    }
+}
+
 // ── Hysteria2 ─────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub struct Hysteria2Config {
     pub listen: String,
+    pub port: u16,
     pub tls: Hy2TlsConfig,
     pub auth: AuthConfig,
     #[serde(default)]
@@ -237,6 +289,7 @@ pub struct Hysteria2Config {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub struct Hy2TlsConfig {
     pub cert_path: Option<String>,
     pub key_path: Option<String>,
@@ -251,12 +304,14 @@ pub enum AuthConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(rename_all = "kebab-case")]
 pub struct BandwidthConfig {
     pub up: Option<String>,
     pub down: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(rename_all = "kebab-case")]
 pub struct MasqueradeConfig {
     #[serde(default = "default_masquerade_type")]
     pub r#type: String,
@@ -264,6 +319,7 @@ pub struct MasqueradeConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub struct MasqueradeProxy {
     pub url: String,
     #[serde(default)]
@@ -273,6 +329,7 @@ pub struct MasqueradeProxy {
 // ── Shared Transport config ───────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub struct TransportConfig {
     #[serde(default = "default_transport_type")]
     pub r#type: String,
@@ -328,6 +385,7 @@ pub enum VlessTlsConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub struct RealityConfig {
     pub private_key: String,
     pub short_ids: Vec<String>,
@@ -346,8 +404,10 @@ fn default_reality_max_time_diff() -> u64 {
 // ── VLESS ─────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub struct VlessConfig {
     pub listen: String,
+    pub port: u16,
     pub uuid: String,
     #[serde(default)]
     pub transport: TransportConfig,
@@ -371,8 +431,10 @@ pub struct VlessConfig {
 // ── Trojan ───────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub struct TrojanConfig {
     pub listen: String,
+    pub port: u16,
     pub password: String,
     #[serde(default)]
     pub transport: TransportConfig,
@@ -396,14 +458,17 @@ pub struct TrojanConfig {
 // ── HTTP（标准 HTTP CONNECT 代理，RFC 7231/RFC 9110）─────────────────────────
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub struct HttpAuthUser {
     pub username: String,
     pub password: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub struct HttpConfig {
     pub listen: String,
+    pub port: u16,
     /// 不填 = 无认证；填了则要求 Proxy-Authorization: Basic 匹配其中一个用户。
     #[serde(default, deserialize_with = "one_or_many_opt")]
     pub users: Vec<HttpAuthUser>,
@@ -432,8 +497,10 @@ pub struct HttpConfig {
 // （uTLS）与本服务端无关，本服务端的 TLS 层与其他协议一样使用 rustls。
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub struct NaiveproxyConfig {
     pub listen: String,
+    pub port: u16,
     /// Proxy-Authorization: Basic 用户名/密码，至少配置一个。
     #[serde(default, deserialize_with = "one_or_many_opt")]
     pub users: Vec<HttpAuthUser>,
@@ -471,8 +538,10 @@ pub struct NaiveproxyMasquerade {
 // ── VMess ────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub struct VmessConfig {
     pub listen: String,
+    pub port: u16,
     pub uuid: String,
     #[serde(default)]
     pub transport: TransportConfig,
@@ -523,8 +592,10 @@ impl ShadowsocksCipher {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub struct ShadowsocksConfig {
     pub listen: String,
+    pub port: u16,
     pub password: String,
     #[serde(default = "default_ss_cipher")]
     pub method: ShadowsocksCipher,
@@ -550,8 +621,10 @@ pub struct ShadowsocksConfig {
 // ── AnyTLS ────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub struct AnyTlsConfig {
     pub listen: String,
+    pub port: u16,
     pub password: String,
     pub tls: StandardTlsConfig,
     pub padding_scheme: Option<String>,
@@ -595,8 +668,10 @@ pub struct AnyTlsConfig {
 /// password = "pass1"
 /// ```
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub struct ShadowquicConfig {
     pub listen: String,
+    pub port: u16,
 
     /// JLS 用户列表（username/password 必须与客户端一致）
     #[serde(default, deserialize_with = "one_or_many_opt")]
@@ -694,8 +769,10 @@ fn default_sq_udp_timeout() -> Duration {
 // ── WireGuard ─────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub struct WireGuardConfig {
     pub listen: String,
+    pub port: u16,
     pub private_key: String,
     #[serde(default)]
     pub server_address: Vec<String>,
@@ -706,6 +783,7 @@ pub struct WireGuardConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub struct WireGuardPeerConfig {
     pub public_key: String,
     pub pre_shared_key: Option<String>,
@@ -724,20 +802,6 @@ fn default_ss_cipher() -> ShadowsocksCipher {
 }
 
 // ── Shared ────────────────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct LogConfig {
-    #[serde(default = "default_log_level")]
-    pub level: String,
-}
-
-impl Default for LogConfig {
-    fn default() -> Self {
-        Self {
-            level: default_log_level(),
-        }
-    }
-}
 
 /// 用户未配置 [node.bandwidth] 或未配置某个方向时使用的默认值。
 /// 选用较保守的数值，避免在完全未知链路条件的机器上过度暴发。
@@ -803,6 +867,14 @@ pub fn load(path: &str) -> Result<Config> {
     let content = std::fs::read_to_string(Path::new(path))
         .with_context(|| format!("cannot read config file: {path}"))?;
     let cfg: Config =
-        toml::from_str(&content).with_context(|| format!("invalid TOML in {path}"))?;
+        serde_yaml::from_str(&content).with_context(|| format!("invalid YAML in {path}"))?;
+    if let Some(dup) = cfg.check_duplicate_names() {
+        anyhow::bail!("duplicate node name `{dup}`");
+    }
+    for n in &cfg.nodes {
+        if n.name.trim().is_empty() {
+            anyhow::bail!("node name must not be empty");
+        }
+    }
     Ok(cfg)
 }
