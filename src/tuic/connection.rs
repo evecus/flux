@@ -170,7 +170,7 @@ impl TuicUdpPair {
         match outbound {
             Outbound::Direct(_) => {
                 let socket_v4 = {
-                    let bind_addr_v4 = cfg.outbound_bind_ipv4.unwrap_or(Ipv4Addr::UNSPECIFIED);
+                    let bind_addr_v4 = cfg.outbound.outbound_bind_ipv4.unwrap_or(Ipv4Addr::UNSPECIFIED);
                     let s = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
                     s.set_nonblocking(true)?;
                     s.bind(&SockAddr::from(SocketAddr::from((bind_addr_v4, 0))))?;
@@ -178,7 +178,7 @@ impl TuicUdpPair {
                 };
 
                 let socket_v6 = if udp_relay_ipv6 {
-                    let bind_addr_v6 = cfg.outbound_bind_ipv6.unwrap_or(Ipv6Addr::UNSPECIFIED);
+                    let bind_addr_v6 = cfg.outbound.outbound_bind_ipv6.unwrap_or(Ipv6Addr::UNSPECIFIED);
                     let s = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP))?;
                     s.set_nonblocking(true)?;
                     s.set_only_v6(true)?;
@@ -255,8 +255,6 @@ impl UdpSession {
         max_pkt_size: usize,
     ) -> std::io::Result<Arc<Self>> {
         let outbound_cfg = crate::common::outbound::Outbound::new(
-            conn.cfg.outbound_bind_ipv4,
-            conn.cfg.outbound_bind_ipv6,
             &conn.cfg.outbound,
         );
         let udp = TuicUdpPair::bind(&outbound_cfg, &conn.cfg, udp_relay_ipv6).await?;
@@ -823,8 +821,6 @@ impl Connection {
     async fn dial_tcp(&self, addr: &Address) -> anyhow::Result<TcpStream> {
         let addrs = self.resolve_addr_list(addr).await?;
         let outbound = crate::common::outbound::Outbound::new(
-            self.cfg.outbound_bind_ipv4,
-            self.cfg.outbound_bind_ipv6,
             &self.cfg.outbound,
         );
         let mut last_err = None;

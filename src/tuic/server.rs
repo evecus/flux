@@ -109,7 +109,7 @@ pub async fn run(cfg: Arc<TuicConfig>) -> Result<()> {
 }
 
 async fn build_tls(cfg: &TuicConfig) -> Result<RustlsServerConfig> {
-    let tls = cfg.tls.as_ref();
+    let tls = cfg.tls.as_opt();
     match (
         tls.and_then(|t| t.cert_path.as_deref()),
         tls.and_then(|t| t.key_path.as_deref()),
