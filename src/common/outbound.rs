@@ -1,19 +1,17 @@
-//! 链式出站代理（`[node.outbound]`）。
+//! 链式出站代理（节点上的 `outbound-socks5` 等平铺字段）。
 //!
-//! 每个协议 node 可选配置一个上游 SOCKS5 出站：
+//! 每个协议节点可选配置一个上游 SOCKS5 出站：
 //!
-//! ```toml
-//! [node.outbound]
-//! type     = "socks5"
-//! addr     = "127.0.0.1:1080"
-//! username = "user"     # 可选
-//! password = "pass"     # 可选
+//! ```yaml
+//! outbound-socks5: "127.0.0.1:1080"
+//! outbound-username: user     # 可选，须与 outbound-password 同时填写
+//! outbound-password: pass
 //! ```
 //!
-//! 不配置 `[node.outbound]`：该 node 所有出站走直连（原有行为不变，
-//! `outbound_bind_ipv4` / `outbound_bind_ipv6` 依旧对直连生效）。
+//! 不配置 `outbound-socks5`：该节点所有出站走直连（`outbound-bind-ipv4` /
+//! `outbound-bind-ipv6` 对直连生效）。
 //!
-//! 配置了 `[node.outbound]`：该 node 的 **TCP 与 UDP 出站流量都必须**
+//! 配置了 `outbound-socks5`：该节点的 **TCP 与 UDP 出站流量都必须**
 //! 经由这个 SOCKS5 服务器转发（TCP 用 CONNECT，UDP 用 UDP ASSOCIATE）。
 //! 这是严格模式 —— 握手 / ASSOCIATE 失败就直接判定本次连接 / UDP 会话
 //! 失败，绝不会静默回退成直连，避免流量意外绕过链式代理导致出口 IP 泄漏。
@@ -47,20 +45,18 @@ pub struct Socks5Config {
 }
 
 impl Outbound {
-    /// 根据协议 config 里的 `outbound_bind_ipv4/ipv6` + 可选 `outbound`
-    /// 构造统一出站配置。各协议模块原先构造 `OutboundBind::new(...)`
-    /// 的地方直接替换为本函数即可。
-    pub fn new(
-        bind_v4: Option<std::net::Ipv4Addr>,
-        bind_v6: Option<std::net::Ipv6Addr>,
-        outbound: &Option<OutboundConfig>,
-    ) -> Self {
-        match outbound {
-            None => Outbound::Direct(OutboundBind::new(bind_v4, bind_v6)),
-            Some(cfg) => Outbound::Socks5(Arc::new(Socks5Config {
-                addr: cfg.addr().to_string(),
-                username: cfg.username().cloned(),
-                password: cfg.password().cloned(),
+    /// 根据节点的平铺出站字段（`outbound-bind-*` / `outbound-socks5` 等）
+    /// 构造统一出站配置。
+    pub fn new(cfg: &OutboundConfig) -> Self {
+        match &cfg.outbound_socks5 {
+            None => Outbound::Direct(OutboundBind::new(
+                cfg.outbound_bind_ipv4,
+                cfg.outbound_bind_ipv6,
+            )),
+            Some(addr) => Outbound::Socks5(Arc::new(Socks5Config {
+                addr: addr.clone(),
+                username: cfg.outbound_username.clone(),
+                password: cfg.outbound_password.clone(),
             })),
         }
     }
