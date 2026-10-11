@@ -36,9 +36,11 @@ where
 /// Bare IPv6 hosts (containing `:`) are bracketed: `::` + 443 → `[::]:443`.
 pub fn join_listen_addr(listen: &str, port: u16) -> Result<std::net::SocketAddr> {
     let s = listen.trim();
+    let s = if s.is_empty() { "::" } else { s };
     let joined = if s.starts_with('[') {
         format!("{s}:{port}")
     } else if s.contains(':') {
+        // bare IPv6 (including default `::`)
         format!("[{s}]:{port}")
     } else {
         format!("{s}:{port}")
@@ -50,6 +52,7 @@ pub fn join_listen_addr(listen: &str, port: u16) -> Result<std::net::SocketAddr>
 
 pub fn format_listen(listen: &str, port: u16) -> String {
     let s = listen.trim();
+    let s = if s.is_empty() { "::" } else { s };
     if s.starts_with('[') {
         format!("{s}:{port}")
     } else if s.contains(':') {
@@ -167,6 +170,9 @@ pub struct SocksUser {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct SocksConfig {
+    /// Bind address. Omit or leave empty → `::` (IPv4+IPv6, external access).
+    /// Use `127.0.0.1` / `0.0.0.0` / a specific IP when needed.
+    #[serde(default = "default_listen")]
     pub listen: String,
     pub port: u16,
     #[serde(default, deserialize_with = "one_or_many_opt")]
@@ -199,6 +205,9 @@ pub struct TuicUser {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct TuicConfig {
+    /// Bind address. Omit or leave empty → `::` (IPv4+IPv6, external access).
+    /// Use `127.0.0.1` / `0.0.0.0` / a specific IP when needed.
+    #[serde(default = "default_listen")]
     pub listen: String,
     pub port: u16,
     pub users: Vec<TuicUser>,
@@ -264,6 +273,9 @@ impl TuicConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct Hysteria2Config {
+    /// Bind address. Omit or leave empty → `::` (IPv4+IPv6, external access).
+    /// Use `127.0.0.1` / `0.0.0.0` / a specific IP when needed.
+    #[serde(default = "default_listen")]
     pub listen: String,
     pub port: u16,
     pub tls: Hy2TlsConfig,
@@ -406,6 +418,9 @@ fn default_reality_max_time_diff() -> u64 {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct VlessConfig {
+    /// Bind address. Omit or leave empty → `::` (IPv4+IPv6, external access).
+    /// Use `127.0.0.1` / `0.0.0.0` / a specific IP when needed.
+    #[serde(default = "default_listen")]
     pub listen: String,
     pub port: u16,
     pub uuid: String,
@@ -433,6 +448,9 @@ pub struct VlessConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct TrojanConfig {
+    /// Bind address. Omit or leave empty → `::` (IPv4+IPv6, external access).
+    /// Use `127.0.0.1` / `0.0.0.0` / a specific IP when needed.
+    #[serde(default = "default_listen")]
     pub listen: String,
     pub port: u16,
     pub password: String,
@@ -467,6 +485,9 @@ pub struct HttpAuthUser {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct HttpConfig {
+    /// Bind address. Omit or leave empty → `::` (IPv4+IPv6, external access).
+    /// Use `127.0.0.1` / `0.0.0.0` / a specific IP when needed.
+    #[serde(default = "default_listen")]
     pub listen: String,
     pub port: u16,
     /// 不填 = 无认证；填了则要求 Proxy-Authorization: Basic 匹配其中一个用户。
@@ -499,6 +520,9 @@ pub struct HttpConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct NaiveproxyConfig {
+    /// Bind address. Omit or leave empty → `::` (IPv4+IPv6, external access).
+    /// Use `127.0.0.1` / `0.0.0.0` / a specific IP when needed.
+    #[serde(default = "default_listen")]
     pub listen: String,
     pub port: u16,
     /// Proxy-Authorization: Basic 用户名/密码，至少配置一个。
@@ -540,6 +564,9 @@ pub struct NaiveproxyMasquerade {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct VmessConfig {
+    /// Bind address. Omit or leave empty → `::` (IPv4+IPv6, external access).
+    /// Use `127.0.0.1` / `0.0.0.0` / a specific IP when needed.
+    #[serde(default = "default_listen")]
     pub listen: String,
     pub port: u16,
     pub uuid: String,
@@ -594,6 +621,9 @@ impl ShadowsocksCipher {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct ShadowsocksConfig {
+    /// Bind address. Omit or leave empty → `::` (IPv4+IPv6, external access).
+    /// Use `127.0.0.1` / `0.0.0.0` / a specific IP when needed.
+    #[serde(default = "default_listen")]
     pub listen: String,
     pub port: u16,
     pub password: String,
@@ -623,6 +653,9 @@ pub struct ShadowsocksConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct AnyTlsConfig {
+    /// Bind address. Omit or leave empty → `::` (IPv4+IPv6, external access).
+    /// Use `127.0.0.1` / `0.0.0.0` / a specific IP when needed.
+    #[serde(default = "default_listen")]
     pub listen: String,
     pub port: u16,
     pub password: String,
@@ -670,6 +703,9 @@ pub struct AnyTlsConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct ShadowquicConfig {
+    /// Bind address. Omit or leave empty → `::` (IPv4+IPv6, external access).
+    /// Use `127.0.0.1` / `0.0.0.0` / a specific IP when needed.
+    #[serde(default = "default_listen")]
     pub listen: String,
     pub port: u16,
 
@@ -771,6 +807,9 @@ fn default_sq_udp_timeout() -> Duration {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct WireGuardConfig {
+    /// Bind address. Omit or leave empty → `::` (IPv4+IPv6, external access).
+    /// Use `127.0.0.1` / `0.0.0.0` / a specific IP when needed.
+    #[serde(default = "default_listen")]
     pub listen: String,
     pub port: u16,
     pub private_key: String,
@@ -849,6 +888,11 @@ impl BandwidthConfig {
 
 fn default_log_level() -> String {
     "info".to_string()
+}
+/// Default listen address: dual-stack wildcard (`::`), reachable from external hosts.
+/// Explicit `0.0.0.0` / `127.0.0.1` / specific IPs remain valid when set.
+fn default_listen() -> String {
+    "::".into()
 }
 fn default_masquerade_type() -> String {
     "none".to_string()
