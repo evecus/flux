@@ -38,7 +38,7 @@ const REP_ATYP_NOT_SUPPORTED: u8 = 0x08;
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 pub async fn run(cfg: Arc<SocksConfig>) -> Result<()> {
-    let addr: SocketAddr = cfg.listen.parse()?;
+    let addr: SocketAddr = crate::config::join_listen_addr(&cfg.listen, cfg.port)?;
     let listener = TcpListener::bind(addr).await?;
     let auth_label = if cfg.users.is_empty() {
         "none"
@@ -150,7 +150,7 @@ async fn handle(mut stream: TcpStream, peer: SocketAddr, cfg: &SocksConfig) -> R
 
     // ── Connect to target ─────────────────────────────────────────────────────
     let outbound_cfg =
-        shared_net::Outbound::new(cfg.outbound_bind_ipv4, cfg.outbound_bind_ipv6, &cfg.outbound);
+        shared_net::Outbound::new(&cfg.outbound);
     match shared_net::dial_tcp(&target, &outbound_cfg).await {
         Ok(outbound) => {
             send_reply(&mut stream, REP_SUCCESS).await?;
