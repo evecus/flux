@@ -6,8 +6,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build-x64:
-    name: linux-x64
+  build:
+    name: build
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
