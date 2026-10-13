@@ -6,8 +6,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-    name: build
+  build-arm64:
+    name: linux-arm64
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -35,7 +35,7 @@ jobs:
         with:
           tool: cross
 
-      - name: Build release
+      - name: Build release (aarch64)
         run: cross build --release --target aarch64-unknown-linux-musl --locked
       
       - run: |
