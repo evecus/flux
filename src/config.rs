@@ -118,6 +118,7 @@ pub enum NodeInner {
     Http(HttpConfig),
     Naiveproxy(NaiveproxyConfig),
     Shadowquic(ShadowquicConfig),
+    Spectre(SpectreConfig),
 }
 
 impl NodeInner {
@@ -135,6 +136,7 @@ impl NodeInner {
             NodeInner::Http(c) => &c.extra,
             NodeInner::Naiveproxy(c) => &c.extra,
             NodeInner::Shadowquic(c) => &c.extra,
+            NodeInner::Spectre(c) => &c.extra,
         }
     }
 }
@@ -688,6 +690,67 @@ fn default_sq_udp_timeout() -> Duration {
     Duration::from_secs(30)
 }
 
+// ── Spectre ──────────────────────────────────────────────────────────────
+
+/// Spectre 服务端入站配置（QUIC + JLS 伪装 + Brutal 拥塞控制）。
+///
+/// 协议来自 spectre-master（`src/server` + `src/protocol`）：认证失败的
+/// QUIC 握手被 quinn-jls 透明转发到 `upstream`（必须是真实 HTTP/3 站点），
+/// 探测者看到的是正常网站；通过 JLS 认证的客户端在控制流 AUTH 之后，
+/// 每个代理目标开一条双向流（TCP Connect / UDP Associate），UDP 走
+/// QUIC datagram + 分片。Brutal 目标速率取客户端 AUTH 帧声明的下载速率。
+///
+/// ```yaml
+/// - name: sp-in
+///   type: spectre
+///   port: 4433
+///   password: your-strong-password   # JLS 密钥，须与客户端一致
+///   server-name: www.cloudflare.com  # SNI，须与客户端一致
+///   upstream: www.cloudflare.com:443 # 未认证流量转发到此（真实站点）
+/// ```
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct SpectreConfig {
+    #[serde(default = "default_listen")]
+    pub listen: String,
+    pub port: u16,
+    /// JLS 密钥（password）。与客户端完全一致。
+    pub password: String,
+    /// JLS 用户名（iv）。默认 "spectre"；留空则不校验用户名。
+    #[serde(default)]
+    pub username: Option<String>,
+    /// JLS 伪装用的 SNI 域名，须与客户端一致，且应为 `upstream` 的 host。
+    #[serde(default = "default_spectre_server_name")]
+    pub server_name: String,
+    /// 未认证/探测流量透明转发到的真实站点（host:port），须支持 HTTP/3。
+    #[serde(default = "default_spectre_upstream")]
+    pub upstream: String,
+    /// Salamander 报文混淆 PSK（可选）。配置后每个外层 UDP 包都带
+    /// 8 字节随机盐 + XOR 混淆，对抗被动 QUIC 指纹；须与客户端一致。
+    #[serde(default)]
+    pub obfs_psk: Option<String>,
+    /// UDP 会话空闲超时（读任务无回包多久后回收会话）。
+    #[serde(default = "default_spectre_udp_timeout", with = "humantime_serde")]
+    pub udp_timeout: Duration,
+    /// 是否中继 IPv6 UDP 目标（Direct 出站时才会建 v6 socket）。
+    #[serde(default)]
+    pub udp_relay_ipv6: bool,
+    #[serde(flatten)]
+    pub outbound: OutboundConfig,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+fn default_spectre_server_name() -> String {
+    "www.cloudflare.com".into()
+}
+fn default_spectre_upstream() -> String {
+    "www.cloudflare.com:443".into()
+}
+fn default_spectre_udp_timeout() -> Duration {
+    Duration::from_secs(120)
+}
+
 // ── WireGuard ─────────────────────────────────────────────────────────────────
 
 /// WireGuard 不支持 `outbound-*`（流量走内置虚拟网卡）。
@@ -831,6 +894,7 @@ impl Config {
                 NodeInner::Http(c) => resolve_standard_tls(&mut c.tls, base_dir),
                 NodeInner::Naiveproxy(c) => resolve_standard_tls(&mut c.tls, base_dir),
                 NodeInner::Socks(_) | NodeInner::Wireguard(_) | NodeInner::Shadowquic(_) => {}
+                NodeInner::Spectre(_) => {}
             }
         }
     }
@@ -907,6 +971,20 @@ impl NodeConfig {
             }
             NodeInner::Socks(c) => check_outbound(&c.outbound)?,
             NodeInner::Shadowquic(c) => check_outbound(&c.outbound)?,
+            NodeInner::Spectre(c) => {
+                check_outbound(&c.outbound)?;
+                if c.password.trim().is_empty() {
+                    bail!("`password` (JLS secret) must not be empty");
+                }
+                if let Some(psk) = &c.obfs_psk {
+                    if psk.len() < crate::spectre::obfs::MIN_PSK_LEN {
+                        bail!(
+                            "`obfs-psk` must be at least {} bytes",
+                            crate::spectre::obfs::MIN_PSK_LEN
+                        );
+                    }
+                }
+            }
             NodeInner::Wireguard(_) => {}
         }
         Ok(())
@@ -1183,16 +1261,20 @@ nodes:
     jls-upstream: google.com:443
     users: [{username: u, password: p}]
     congestion-control: cubic
+  - name: sp
+    type: spectre
+    port: 10
+    password: spectre-pw
   - name: wg
     type: wireguard
-    port: 10
+    port: 11
     private-key: K
     server-address: [10.0.0.1/24]
     peers: [{public-key: P, allowed-ips: [10.0.0.2/32]}]
 "#,
         )
         .unwrap();
-        assert_eq!(cfg.nodes.len(), 10);
+        assert_eq!(cfg.nodes.len(), 11);
         let NodeInner::Tuic(t) = &cfg.nodes[3].inner else {
             panic!()
         };
@@ -1211,6 +1293,97 @@ nodes:
         };
         assert_eq!(q.congestion_control, "cubic");
         assert_eq!(q.alpn, vec!["h3"]);
+        let NodeInner::Spectre(s) = &cfg.nodes[9].inner else {
+            panic!()
+        };
+        assert_eq!(s.password, "spectre-pw");
+        assert_eq!(s.server_name, "www.cloudflare.com");
+        assert_eq!(s.upstream, "www.cloudflare.com:443");
+        assert_eq!(s.udp_timeout, Duration::from_secs(120));
+        assert!(s.username.is_none());
+        assert!(s.obfs_psk.is_none());
+    }
+
+    #[test]
+    fn spectre_config() {
+        // 最小配置：只写 password，其余走默认
+        let cfg = parse_str("nodes:\n  - {name: sp, type: spectre, port: 4433, password: pw}\n")
+            .unwrap();
+        let NodeInner::Spectre(s) = &cfg.nodes[0].inner else {
+            panic!()
+        };
+        assert_eq!(s.listen, "::");
+        assert_eq!(s.server_name, "www.cloudflare.com");
+        assert_eq!(s.upstream, "www.cloudflare.com:443");
+        assert_eq!(s.udp_timeout, Duration::from_secs(120));
+        assert!(!s.udp_relay_ipv6);
+
+        // 完整配置
+        let cfg = parse_str(
+            r#"
+nodes:
+  - name: sp-full
+    type: spectre
+    listen: "0.0.0.0"
+    port: 4433
+    password: pw
+    username: spectre
+    server-name: www.example.com
+    upstream: www.example.com:443
+    obfs-psk: "0123456789abcdef"
+    udp-timeout: 60s
+    udp-relay-ipv6: true
+    outbound-bind-ipv4: 203.0.113.10
+"#,
+        )
+        .unwrap();
+        let NodeInner::Spectre(s) = &cfg.nodes[0].inner else {
+            panic!()
+        };
+        assert_eq!(s.listen, "0.0.0.0");
+        assert_eq!(s.username.as_deref(), Some("spectre"));
+        assert_eq!(s.server_name, "www.example.com");
+        assert_eq!(s.upstream, "www.example.com:443");
+        assert_eq!(s.obfs_psk.as_deref(), Some("0123456789abcdef"));
+        assert_eq!(s.udp_timeout, Duration::from_secs(60));
+        assert!(s.udp_relay_ipv6);
+        assert_eq!(
+            s.outbound.outbound_bind_ipv4,
+            Some("203.0.113.10".parse().unwrap())
+        );
+
+        // 链式 SOCKS5 出站
+        let cfg = parse_str(
+            "nodes:\n  - {name: sp, type: spectre, port: 1, password: p, outbound-socks5: '127.0.0.1:1080', outbound-username: u, outbound-password: w}\n",
+        )
+        .unwrap();
+        let NodeInner::Spectre(s) = &cfg.nodes[0].inner else {
+            panic!()
+        };
+        assert_eq!(
+            s.outbound.outbound_socks5.as_deref(),
+            Some("127.0.0.1:1080")
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_spectre_config() {
+        // password 必填
+        assert!(parse_str("nodes:\n  - {name: sp, type: spectre, port: 1}\n").is_err());
+        // password 不能为空串
+        assert!(err("nodes:\n  - {name: sp, type: spectre, port: 1, password: '  '}\n")
+            .contains("must not be empty"));
+        // obfs-psk 至少 4 字节
+        assert!(err("nodes:\n  - {name: sp, type: spectre, port: 1, password: p, obfs-psk: 'ab'}\n")
+            .contains("obfs-psk"));
+        // 出站认证须成对
+        assert!(err(
+            "nodes:\n  - {name: sp, type: spectre, port: 1, password: p, outbound-socks5: 'h:1', outbound-username: u}\n"
+        )
+        .contains("together"));
+        // 未知字段报错
+        assert!(err("nodes:\n  - {name: sp, type: spectre, port: 1, password: p, sni: x}\n")
+            .contains("`sni`"));
     }
 
     #[test]

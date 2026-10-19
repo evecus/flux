@@ -8,6 +8,7 @@ mod naiveproxy;
 mod shadowquic;
 mod shadowsocks;
 mod socks;
+mod spectre;
 mod trojan;
 mod tuic;
 mod vless;
@@ -76,7 +77,7 @@ async fn main() -> Result<()> {
 
     if cfg.is_empty() {
         anyhow::bail!(
-            "no nodes configured — add at least one entry under `nodes:`              (type: vless / vmess / trojan / shadowsocks / hysteria2 / tuic /              wireguard / anytls / socks / http / naiveproxy / shadowquic)"
+            "no nodes configured — add at least one entry under `nodes:`              (type: vless / vmess / trojan / shadowsocks / hysteria2 / tuic /              wireguard / anytls / socks / http / naiveproxy / shadowquic / spectre)"
         );
     }
 
@@ -263,6 +264,23 @@ async fn main() -> Result<()> {
                 );
                 handles.push(tokio::spawn(async move {
                     if let Err(e) = shadowquic::run(c).await {
+                        tracing::error!("[{tag}] server exited: {e:#}");
+                    }
+                }));
+            }
+
+            // ── Spectre ───────────────────────────────────────────────────────
+            config::NodeInner::Spectre(c) => {
+                let c = Arc::new(c);
+                info!(
+                    "[{tag}] spectre, listen: {}, sni={}, upstream={}, obfs={}",
+                    config::format_listen(&c.listen, c.port),
+                    c.server_name,
+                    c.upstream,
+                    if c.obfs_psk.is_some() { "on" } else { "off" },
+                );
+                handles.push(tokio::spawn(async move {
+                    if let Err(e) = spectre::run(c).await {
                         tracing::error!("[{tag}] server exited: {e:#}");
                     }
                 }));
