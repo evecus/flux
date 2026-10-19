@@ -31,6 +31,12 @@ shadowquic = { version = "0.3.7", default-features = false, features = ["shadowq
 quinn-jls = { version = "=0.3.4", default-features = false }
 quinn-proto-jls = { version = "=0.3.5", default-features = false }
 
+# Spectre 入站（QUIC + JLS）：协议移植自 spectre-master，同样跑在 quinn-jls 上。
+# rustls-jls 此前经 shadowquic 间接进入依赖图（1.3.7），此处提为直接依赖。
+# 仅启用 ring 一个 provider feature：rustls-jls 的 ServerConfig::builder()
+# 会依 feature 自动安装进程级 ring provider，无需显式 install_default。
+rustls-jls = { version = "1.3", default-features = false, features = ["ring", "std", "tls12"] }
+
 # HTTP/3 (Hysteria2 auth uses H3)
 h3 = "0.0.8"
 h3-quinn = "0.0.10"

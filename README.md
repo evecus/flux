@@ -12,6 +12,7 @@ A multi-protocol proxy server written in Rust.
 | VLESS | WebSocket |
 | VLESS | WebSocket + TLS |
 | VLESS | **Reality** (new) |
+| Spectre | QUIC + JLS + Brutal |
 
 ## Usage
 
@@ -123,6 +124,32 @@ openssl genpkey -algorithm x25519 2>/dev/null | openssl pkey -noout -text 2>&1 \
 # Use xray or any x25519 tool, e.g.:
 #   xray x25519
 ```
+
+### Spectre
+
+QUIC + JLS 伪装 + Brutal 拥塞控制的自研协议（移植自 spectre 项目）。认证失败的
+QUIC 握手被透明转发到 `upstream` 指向的真实站点，主动探测者看到的是一个正常
+网站；通过 JLS 认证的客户端在控制流 AUTH 之后，每个代理目标开一条双向流
+（TCP Connect / UDP Associate / Padding），UDP 走 QUIC datagram + 分片重组。
+Brutal 的目标速率取客户端 AUTH 帧声明的下载速率（0 = 退回 BBR）。
+
+```yaml
+nodes:
+  - name: sp-in
+    type: spectre
+    port: 4433
+    password: your-strong-password   # JLS 密钥，须与客户端一致
+    server-name: www.cloudflare.com  # SNI，须与客户端一致
+    upstream: www.cloudflare.com:443 # 未认证流量转发到此，须支持 HTTP/3
+    # 可选字段（括号内为默认值）：
+    # username: spectre               # ("spectre") JLS 用户名；留空则不校验
+    # obfs-psk: "at-least-4-bytes"    # Salamander 报文混淆 PSK，须与客户端一致
+    # udp-timeout: 120s               # (120s) UDP 会话空闲超时
+    # udp-relay-ipv6: false           # (false) 是否中继 IPv6 UDP
+```
+
+Spectre 节点同样支持通用的 `outbound-bind-ipv4` / `outbound-bind-ipv6` /
+`outbound-socks5` 出站字段（TCP 与 UDP 出站均走统一出口）。
 
 ## Build
 

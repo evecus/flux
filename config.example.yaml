@@ -280,6 +280,26 @@ nodes:
   #   udp-timeout: 30s                # (30s)
 
 
+  # ════════════════════════════════════════════════════════════════════════════
+  # 13. Spectre（QUIC + JLS 伪装 + Brutal 拥塞控制）
+  # ════════════════════════════════════════════════════════════════════════════
+  # 认证失败的 QUIC 握手被透明转发到 upstream（真实站点），探测者看到正常网站
+  # password / server-name 必须与客户端一致；Brutal 速率取客户端声明的下载速率
+  # 生成密码：flux generate password
+  #
+  # - name: sp-in
+  #   type: spectre
+  #   port: 4433
+  #   password: your-strong-password-here
+  #   username: spectre                # 可选（spectre）；留空则不校验用户名
+  #   server-name: www.cloudflare.com  # SNI，须与客户端一致
+  #   upstream: www.cloudflare.com:443 # 未认证流量转发到此，须支持 HTTP/3
+  #   # 以下均为可选（括号内为默认值）
+  #   obfs-psk: "at-least-4-bytes"     # Salamander 报文混淆 PSK，须与客户端一致
+  #   udp-timeout: 120s                # (120s) UDP 会话空闲超时
+  #   udp-relay-ipv6: false            # (false) 是否中继 IPv6 UDP
+
+
   # ── 最小可运行示例（请改密码后使用；或注释掉并启用上方某一完整块）──────────
   - name: hy2-demo
     type: hysteria2
