@@ -20,7 +20,7 @@ jobs:
           key: x86_64-unknown-linux-gnu
 
       - name: Build
-        run: cargo build --release --target x86_64-unknown-linux-gnu
+        run: cargo build --release --target x86_64-unknown-linux-gnu --locked
 
       - run: |
           mkdir dist
