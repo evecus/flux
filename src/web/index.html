@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>flux · 节点面板</title>
+<style>
+:root{--ink:#0f172a;--mut:#64748b;--line:#e8edf5;--brand:#4f46e5;--cyan:#06b6d4;--ok:#10b981;--idle:#cbd5e1;--bad:#ef4444;--card:#fff}
+*{box-sizing:border-box}
+body{margin:0;font-family:system-ui,-apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;color:var(--ink);background:#f6f8fc;font-size:14px;line-height:1.5}
+.wrap{max-width:1180px;margin:0 auto;padding:22px}
+.top{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:20px}
+.logo{width:38px;height:38px;border-radius:12px;background:linear-gradient(135deg,var(--brand),var(--cyan));display:grid;place-items:center;color:#fff;font-weight:800;font-size:18px;box-shadow:0 6px 18px rgba(79,70,229,.28)}
+.title{font-size:19px;font-weight:750;letter-spacing:.2px}
+.sub{color:var(--mut);font-size:12px}
+.spacer{flex:1}
+.pill{display:inline-flex;align-items:center;gap:6px;background:#ecfdf5;color:#047857;border:1px solid #d1fae5;border-radius:999px;padding:5px 11px;font-size:12px;font-weight:600}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 3px rgba(16,185,129,.15)}
+.btn{border:1px solid var(--line);background:#fff;color:var(--mut);border-radius:9px;padding:6px 12px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;transition:.18s}
+.btn:hover{border-color:var(--brand);color:var(--brand)}
+.btn.active{background:#eef2ff;border-color:#c7d2fe;color:var(--brand)}
+.btn.danger{color:var(--bad);border-color:#fecaca}
+.btn.danger:hover{background:#fef2f2;border-color:var(--bad)}
+.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:15px}
+.kpi{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:16px 17px;box-shadow:0 2px 10px rgba(15,23,42,.04);position:relative;overflow:hidden;animation:fxin .5s both}
+.kpi:nth-child(2){animation-delay:.06s}.kpi:nth-child(3){animation-delay:.12s}.kpi:nth-child(4){animation-delay:.18s}
+.kpi::after{content:"";position:absolute;right:-24px;top:-24px;width:76px;height:76px;border-radius:50%;background:radial-gradient(circle,rgba(79,70,229,.09),transparent 70%)}
+.kpi .k{color:var(--mut);font-size:12px}
+.kpi .v{font-size:26px;font-weight:780;margin-top:6px;letter-spacing:-.5px;font-variant-numeric:tabular-nums}
+.kpi .v small{font-size:13px;font-weight:600;color:var(--mut);margin-left:3px}
+.kpi .t{font-size:11px;color:var(--mut);margin-top:4px}
+.grid{display:grid;grid-template-columns:1.25fr 1fr;gap:14px;margin-bottom:14px}
+.panel{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:17px;box-shadow:0 2px 10px rgba(15,23,42,.04);animation:fxin .55s both;margin-bottom:14px}
+.grid .panel{margin-bottom:0}
+.ph{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:14px}
+.ph h3{margin:0;font-size:14px;font-weight:700}
+.ph .hint{font-size:11px;color:var(--mut)}
+.seg{display:flex;gap:5px}
+.legend{display:flex;gap:14px;font-size:11px;color:var(--mut)}
+.legend i{display:inline-block;width:8px;height:8px;border-radius:3px;margin-right:5px}
+svg{width:100%;height:auto;display:block}
+.nrow{display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px dashed var(--line)}
+.nrow:last-child{border-bottom:0}
+.badge{font-size:10px;font-weight:700;padding:3px 8px;border-radius:7px;background:#eef2ff;color:var(--brand);white-space:nowrap;text-transform:uppercase}
+.nname{font-weight:650;font-size:13px}
+.naddr{font-size:11px;color:var(--mut);font-variant-numeric:tabular-nums}
+.nstat{margin-left:auto;text-align:right;font-size:11px;color:var(--mut);white-space:nowrap}
+.nstat b{display:block;color:var(--ink);font-size:13px;font-variant-numeric:tabular-nums}
+.st{width:8px;height:8px;border-radius:50%;flex:none}
+.st.on{background:var(--ok);box-shadow:0 0 0 3px rgba(16,185,129,.14)}
+.st.off{background:var(--idle);box-shadow:0 0 0 3px rgba(148,163,184,.12)}
+table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+th{text-align:left;font-size:11px;color:var(--mut);font-weight:600;padding:0 8px 9px 0;border-bottom:1px solid var(--line)}
+td{font-size:12px;padding:10px 8px 10px 0;border-bottom:1px solid #f1f5f9}
+tr:last-child td{border-bottom:0}
+.ip{font-weight:650}
+.tag{font-size:10px;color:var(--mut);background:#f1f5f9;border-radius:6px;padding:2px 7px}
+.mono{font-variant-numeric:tabular-nums;color:var(--mut)}
+.month{display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px dashed var(--line);flex-wrap:wrap}
+.month:last-child{border-bottom:0}
+.month .m{font-weight:650;font-size:13px;min-width:92px}
+.month .v{font-size:12px;color:var(--mut);flex:1}
+.empty{color:var(--mut);font-size:12px;padding:14px 0;text-align:center}
+.err{display:none;background:#fef2f2;color:#b91c1c;border:1px solid #fecaca;border-radius:10px;padding:9px 12px;font-size:12px;margin-bottom:14px}
+.foot{display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;color:var(--mut);font-size:11px;margin-top:4px;padding-top:12px;border-top:1px solid var(--line)}
+@keyframes fxin{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+@media(max-width:820px){.grid{grid-template-columns:1fr}}
+@media(max-width:640px){.wrap{padding:14px}.kpis{grid-template-columns:repeat(2,1fr)}.kpi .v{font-size:22px}.title{font-size:17px}thead{display:none}tr{display:grid;grid-template-columns:1fr auto;gap:2px;padding:9px 0;border-bottom:1px solid #f1f5f9}td{border:0;padding:2px 0}td:nth-child(2),td:nth-child(4){text-align:right}td:nth-child(3){grid-column:1/-1;color:var(--mut);font-size:11px}.nstat{font-size:10px}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <div class="logo">f</div>
+    <div><div class="title">flux · 节点面板</div><div class="sub">实时状态 / 流量 / 连接记录</div></div>
+    <div class="spacer"></div>
+    <div class="pill"><span class="dot"></span><span id="status">加载中</span></div>
+    <button class="btn" id="logout">退出</button>
+  </div>
+
+  <div class="err" id="err"></div>
+
+  <div class="kpis">
+    <div class="kpi"><div class="k">在线节点</div><div class="v" id="k1">—</div><div class="t" id="k1t">有客户端连接视为在线</div></div>
+    <div class="kpi"><div class="k">近 24 小时流量</div><div class="v" id="k2">—</div><div class="t" id="k2t">↑ — · ↓ —</div></div>
+    <div class="kpi"><div class="k">活跃连接</div><div class="v" id="k3">—</div><div class="t" id="k3t">当前进行中的会话</div></div>
+    <div class="kpi"><div class="k">历史独立 IP</div><div class="v" id="k4">—</div><div class="t" id="k4t">持久化记录</div></div>
+  </div>
+
+  <div class="grid">
+    <div class="panel">
+      <div class="ph">
+        <h3>流量趋势</h3>
+        <div class="seg">
+          <button class="btn active" data-range="24h">24 小时</button>
+          <button class="btn" data-range="30d">30 天</button>
+          <button class="btn" data-range="month">按月</button>
+        </div>
+      </div>
+      <div class="ph" style="margin-bottom:4px"><div class="legend"><span><i style="background:#4f46e5"></i>上行（客户端→服务端）</span><span><i style="background:#06b6d4"></i>下行（服务端→客户端）</span></div><span class="hint" id="chartHint">近 24 小时</span></div>
+      <svg id="chart" viewBox="0 0 600 180" preserveAspectRatio="none" role="img" aria-label="流量趋势图"></svg>
+    </div>
+    <div class="panel">
+      <div class="ph"><h3>节点在线情况</h3><span class="hint" id="nodeHint">—</span></div>
+      <div id="nodes"><div class="empty">加载中…</div></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="ph"><h3>最近连接 IP</h3><span class="hint">每 5 秒自动刷新</span></div>
+    <table><thead><tr><th>客户端 IP</th><th>节点</th><th>目标</th><th>时间 / 时长</th></tr></thead><tbody id="conns"><tr><td colspan="4" class="empty">加载中…</td></tr></tbody></table>
+  </div>
+
+  <div class="panel">
+    <div class="ph"><h3>按月统计与数据清理</h3><span class="hint">数据不会自动清理，需手动执行</span></div>
+    <div id="months"><div class="empty">加载中…</div></div>
+    <div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap"><button class="btn danger" id="clearAll">清空全部历史数据</button><span class="hint" style="align-self:center">合计 <b class="mono" id="allTotal">—</b> · 连接 <b class="mono" id="allConns">—</b> 次</span></div>
+  </div>
+
+  <div class="foot"><span id="footL">—</span><span>flux · Web 面板</span></div>
+</div>
+
+<script>
+let range='24h', timer=null;
+const $=id=>document.getElementById(id);
+const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function fmtBytes(n){n=Number(n)||0;if(n<1024)return n+' B';const u=['KB','MB','GB','TB','PB'];let i=-1;do{n/=1024;i++}while(n>=1024&&i<u.length-1);return (n>=10?n.toFixed(1):n.toFixed(2))+' '+u[i]}
+function fmtTime(ms){if(!ms)return '—';const d=new Date(ms);return d.toLocaleString('zh-CN',{hour12:false,month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'})}
+function fmtDur(ms){ms=Number(ms)||0;if(ms<1000)return ms+'ms';if(ms<60000)return (ms/1000).toFixed(1)+'s';if(ms<3600000)return Math.floor(ms/60000)+'m'+(Math.floor(ms%60000/1000))+'s';return Math.floor(ms/3600000)+'h'+Math.floor(ms%3600000/60000)+'m'}
+function fmtUptime(ms){const s=Math.floor((Date.now()-ms)/1000);if(s<60)return s+' 秒';if(s<3600)return Math.floor(s/60)+' 分钟';if(s<86400)return Math.floor(s/3600)+' 小时 '+(Math.floor(s%3600/60))+' 分';return Math.floor(s/86400)+' 天 '+Math.floor(s%86400/3600)+' 小时'}
+async function api(path,opts){const r=await fetch(path,opts);if(r.status===401){location.href='/login';throw new Error('未登录')}if(!r.ok)throw new Error('HTTP '+r.status);return r.json()}
+function showErr(e){const el=$('err');el.style.display='block';el.textContent='加载失败：'+e.message;setTimeout(()=>el.style.display='none',6000)}
+
+function buildSeries(points){
+  const now=Date.now(), nowHour=Math.floor(now/3600000), map=new Map();
+  for(const p of points){const b=p.key.split('|')[0];let k;
+    if(range==='month')k=String(b);
+    else if(range==='30d')k=String(Math.floor(Number(b)/24));
+    else k=String(Number(b));
+    const c=map.get(k)||{up:0,down:0};c.up+=p.up;c.down+=p.down;map.set(k,c);}
+  let keys=[];
+  if(range==='month')keys=[...map.keys()].sort().slice(-12);
+  else if(range==='30d'){const t=Math.floor(nowHour/24);for(let i=29;i>=0;i--)keys.push(String(t-i))}
+  else{for(let i=23;i>=0;i--)keys.push(String(nowHour-i))}
+  const labels=keys.map(k=>{
+    if(range==='month')return k.slice(0,4)+'-'+k.slice(4);
+    if(range==='30d'){const d=new Date(Number(k)*86400000);return (d.getMonth()+1)+'/'+d.getDate()}
+    const d=new Date(Number(k)*3600000);return String(d.getHours()).padStart(2,'0')+':00';
+  });
+  return {labels,up:keys.map(k=>(map.get(k)||{up:0}).up),down:keys.map(k=>(map.get(k)||{down:0}).down)};
+}
+function drawChart(s){
+  const W=600,H=180,L=8,R=8,T=12,B=22,max=Math.max(1,...s.up,...s.down),n=s.up.length;
+  const X=i=>L+i*(W-L-R)/Math.max(1,n-1), Y=v=>T+(1-v/max)*(H-T-B);
+  const pts=a=>a.map((v,i)=>X(i)+' '+Y(v)).join(' L ');
+  const area=a=>'M '+pts(a)+' L '+X(n-1)+' '+(H-B)+' L '+X(0)+' '+(H-B)+' Z';
+  let g='';
+  for(let i=0;i<4;i++){const y=T+i*(H-T-B)/3;g+='<line x1="0" y1="'+y+'" x2="600" y2="'+y+'" stroke="#eef2f7" stroke-width="1"/>'}
+  const defs='<defs><linearGradient id="gU" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#4f46e5" stop-opacity=".22"/><stop offset="1" stop-color="#4f46e5" stop-opacity="0"/></linearGradient><linearGradient id="gD" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#06b6d4" stop-opacity=".18"/><stop offset="1" stop-color="#06b6d4" stop-opacity="0"/></linearGradient></defs>';
+  const body=(n>0)?'<path d="'+area(s.up)+'" fill="url(#gU)"/><path d="M '+pts(s.up)+'" fill="none" stroke="#4f46e5" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/><path d="'+area(s.down)+'" fill="url(#gD)"/><path d="M '+pts(s.down)+'" fill="none" stroke="#06b6d4" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>':'';
+  const labs=s.labels.length?[0,Math.floor((s.labels.length-1)/2),s.labels.length-1].filter((v,i,a)=>a.indexOf(v)===i):[];
+  const xl=labs.map(i=>'<text x="'+X(i)+'" y="'+(H-5)+'" fill="#94a3b8" font-size="11" font-family="system-ui" text-anchor="'+(i===0?'start':i===s.labels.length-1?'end':'middle')+'">'+esc(s.labels[i])+'</text>').join('');
+  const yl='<text x="596" y="'+(T+10)+'" fill="#94a3b8" font-size="10" font-family="system-ui" text-anchor="end">'+fmtBytes(max)+'</text><text x="596" y="'+(H-B-3)+'" fill="#94a3b8" font-size="10" font-family="system-ui" text-anchor="end">0</text>';
+  $('chart').innerHTML=defs+g+body+xl+yl;
+}
+
+function renderNodes(nodes){
+  $('nodeHint').textContent=nodes.filter(n=>n.online).length+' / '+nodes.length+' 在线';
+  if(!nodes.length){$('nodes').innerHTML='<div class="empty">配置中没有节点</div>';return}
+  $('nodes').innerHTML=nodes.map(n=>{
+    const addr=(n.listen&&n.listen!==''? (n.listen.includes(':')?'['+n.listen+']':n.listen) : '::')+':'+n.port;
+    const last=n.last_conn_ms?('最近 '+fmtTime(n.last_conn_ms)):'尚无连接';
+    return '<div class="nrow"><span class="st '+(n.online?'on':'off')+'"></span><span class="badge">'+esc(n.proto)+'</span>'+
+      '<div><div class="nname">'+esc(n.name)+'</div><div class="naddr">'+esc(addr)+' · '+last+'</div></div>'+
+      '<div class="nstat"><b>'+n.active+'</b>连接 · '+fmtBytes(n.up+n.down)+'</div></div>';
+  }).join('');
+}
+function renderConns(rows){
+  if(!rows.length){$('conns').innerHTML='<tr><td colspan="4" class="empty">暂无连接记录</td></tr>';return}
+  $('conns').innerHTML=rows.map(r=>'<tr><td class="ip">'+esc(r.ip||'—')+'</td><td>'+esc(r.node)+'</td><td class="mono">'+esc(r.target||'—')+'</td><td class="mono">'+fmtTime(r.ts_ms)+' · '+fmtDur(r.duration_ms)+'</td></tr>').join('');
+}
+function renderMonths(points){
+  const map=new Map();
+  for(const p of points){const m=p.key.split('|')[0];const c=map.get(m)||{up:0,down:0};c.up+=p.up;c.down+=p.down;map.set(m,c)}
+  const keys=[...map.keys()].sort().reverse();
+  $('months').innerHTML=keys.length?keys.map(k=>{
+    const c=map.get(k),label=k.slice(0,4)+'-'+k.slice(4);
+    return '<div class="month"><span class="m">'+esc(label)+'</span><span class="v">↑ '+fmtBytes(c.up)+' · ↓ '+fmtBytes(c.down)+' · 合计 '+fmtBytes(c.up+c.down)+'</span><button class="btn danger" data-month="'+esc(k)+'">清理该月</button></div>';
+  }).join(''):'<div class="empty">暂无按月数据，产生流量后会出现在这里</div>';
+  document.querySelectorAll('[data-month]').forEach(b=>b.onclick=()=>doClear({month:Number(b.dataset.month)}));
+}
+
+async function doClear(body){
+  if(!confirm(body.month?'确定清理该月的流量与连接记录？此操作不可撤销。':'确定清空全部历史数据（流量、连接记录、IP 统计）？此操作不可撤销。'))return;
+  try{await api('/api/data/clear',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});await refresh()}
+  catch(e){showErr(e)}
+}
+
+async function refresh(){
+  try{
+    const [sum,nodes,tr,conns,months]=await Promise.all([
+      api('/api/summary'),api('/api/nodes'),api('/api/traffic?range='+range),
+      api('/api/connections?limit=30'),api('/api/traffic?range=month')]);
+    $('k1').innerHTML=sum.nodes_online+'<small>/ '+sum.nodes_total+'</small>';
+    $('k1t').textContent='运行 '+fmtUptime(sum.started_ms);
+    $('k2').textContent=fmtBytes(sum.last24_up+sum.last24_down);
+    $('k2t').textContent='↑ '+fmtBytes(sum.last24_up)+' · ↓ '+fmtBytes(sum.last24_down);
+    $('k3').textContent=sum.active_conn;
+    $('k3t').textContent='累计连接 '+sum.total_conns.toLocaleString()+' 次';
+    $('k4').textContent=sum.unique_ips.toLocaleString();
+    $('k4t').textContent='累计流量 '+fmtBytes(sum.total_up+sum.total_down);
+    $('allTotal').textContent=fmtBytes(sum.total_up+sum.total_down);
+    $('allConns').textContent=sum.total_conns.toLocaleString();
+    $('status').textContent='已同步 · '+new Date().toLocaleTimeString('zh-CN',{hour12:false});
+    $('chartHint').textContent=range==='month'?'按月汇总':range==='30d'?'近 30 天':'近 24 小时';
+    $('footL').textContent='累计 ↑ '+fmtBytes(sum.total_up)+' · ↓ '+fmtBytes(sum.total_down)+' · 数据持久化于 redb';
+    drawChart(buildSeries(tr.points||[]));
+    renderNodes(nodes||[]);
+    renderConns(conns||[]);
+    renderMonths(months.points||[]);
+  }catch(e){showErr(e)}
+}
+
+document.querySelectorAll('[data-range]').forEach(b=>b.onclick=()=>{
+  range=b.dataset.range;
+  document.querySelectorAll('[data-range]').forEach(x=>x.classList.toggle('active',x===b));
+  refresh();
+});
+$('clearAll').onclick=()=>doClear({all:true});
+$('logout').onclick=async()=>{try{await fetch('/api/logout',{method:'POST'})}catch(_){}location.href='/login'};
+refresh();timer=setInterval(refresh,5000);
+</script>
+</body>
+</html>

@@ -1,0 +1,38 @@
+name: arm64 ci
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-musl
+      
+      - name: Install musl tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+      
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: aarch64-unknown-linux-musl
+
+      - name: Build
+        run: cargo build --release --target aarch64-unknown-linux-musl --locked
+
+      - run: |
+          mkdir dist
+          mv target/aarch64-unknown-linux-musl/release/flux dist/flux-linux-arm64
+      
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: test
+          files: dist/*

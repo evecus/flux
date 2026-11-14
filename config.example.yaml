@@ -1,0 +1,325 @@
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║                        flux 服务端配置模板（YAML）                            ║
+# ╠══════════════════════════════════════════════════════════════════════════════╣
+# ║  • 默认文件：config.yaml（可用 -c 指定）                                      ║
+# ║  • 所有字段平铺（kebab-case），没有嵌套对象；                                  ║
+# ║    只有 users / peers / headers / 列表 这类“数据”才会成列表或映射             ║
+# ║  • 节点在 nodes: 下声明，name 必填且全局唯一，type 决定协议                   ║
+# ║  • listen 默认 "::"（双栈），port 必填                                        ║
+# ║  • 写错 / 多写 / 沿用旧版嵌套写法的字段会直接报错，不会被静默忽略             ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+
+# error | warn | info | debug | trace | off（设置了 RUST_LOG 则以其为准）
+log-level: info
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Web 面板（可选；不配置或 web: false 时不启用）
+# ══════════════════════════════════════════════════════════════════════════════
+# web: true                         # 启用面板。false 时完全不统计、不打开数据库、不监听端口
+# web-bind: 127.0.0.1:9080         # 默认；面板是明文 HTTP，请勿直接暴露公网
+# web-auth: admin:your-password    # web: true 时必填，登录页用户名:密码
+# db: flux.db                      # redb 数据文件；省略 = 配置文件同目录下的 flux.db
+#                                  # 相对路径按配置文件所在目录解析（-d /path 时即 /path）
+#
+# 面板显示：节点在线情况（有活跃客户端连接视为在线）、13 种协议的上下行流量
+# （按小时 / 按月汇总）、历史连接 IP。数据**不会自动清理**，在面板
+# 「按月统计与数据清理」中手动按月份清理或清空全部。
+#
+# -d /path  自动在该目录寻找 *.yaml / *.yml（优先 config.yaml / config.yml），
+#           证书 cert/key 与 db 的相对路径均以该目录为基准。
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 通用字段（各协议节点共用，下面每个示例里只列出该协议用到的）
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# TLS —— 三个字段都不填 = 未配置 TLS
+#   cert: /path/fullchain.pem
+#   key: /path/privkey.pem            # cert 与 key 必须同时填写
+#   self-signed-domain: example.com   # 或者用自签证书
+#   · vmess / trojan / shadowsocks / http / vless：不填 = 明文
+#   · hysteria2 / tuic / anytls / naiveproxy：协议必须 TLS，不填则自动生成
+#     CN=localhost 的自签证书（仅用于测试）
+#
+# 传输层 —— vless / vmess / trojan / shadowsocks
+#   transport: tcp          # tcp（默认）| ws | xhttp
+#   path: /                 # ws / xhttp 通用
+#   host: your.domain.com   # 可选，严格校验 Host
+#   max-early-data: 0       # 仅 ws：>0 启用 0-RTT 早期数据
+#   early-data-header: Sec-WebSocket-Protocol   # 仅 ws：不填则放在 URL 路径里
+#   headers:                # 仅 ws：自定义请求头
+#     User-Agent: Mozilla/5.0
+#
+# 出站 —— 除 wireguard 外都支持
+#   outbound-bind-ipv4: "203.0.113.10"   # 多公网 IP：指定出口 IP（需已在本机网卡上）
+#   outbound-bind-ipv6: "2001:db8::1"    # 都不填=系统路由；只填一个=该地址族必须走它；都填=按目标自动选
+#   outbound-socks5: "127.0.0.1:1080"    # 链式出站：TCP/UDP 全部经此 SOCKS5，失败不回退直连
+#   outbound-username: user              # 可选，须与 outbound-password 同时填写
+#   outbound-password: pass
+
+
+nodes:
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # 1. Hysteria2（QUIC + TLS）
+  # ════════════════════════════════════════════════════════════════════════════
+  # 生成密码：flux generate password
+  #
+  # - name: hy2-main
+  #   type: hysteria2
+  #   port: 443
+  #   password: your-strong-password-here
+  #   cert: /etc/ssl/certs/server.crt
+  #   key: /etc/ssl/private/server.key
+  #   up: 300 mbps                # 服务端→客户端（用户下载），强烈建议按真实带宽填写
+  #   down: 50 mbps               # 客户端→服务端（用户上传）；单位 gbps / mbps / kbps / bps
+  #   masquerade-url: "https://example.com"   # 可选：未认证请求反代到该站点，不填返回 404
+  #   masquerade-rewrite-host: true
+
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # 2. VLESS
+  # ════════════════════════════════════════════════════════════════════════════
+  # 生成 UUID：flux generate uuid
+  # 生成 Reality 密钥：flux generate reality-keypair
+  # TLS 模式由字段自动判断：
+  #   填 cert+key / self-signed-domain → 标准 TLS
+  #   填 reality-private-key           → Reality（与 cert/key 互斥）
+  #   都不填                           → 明文（仅内网 / 已有外层 TLS）
+  #
+  # ── 2-A 标准 TLS + TCP ──
+  # - name: vless-tls
+  #   type: vless
+  #   port: 8443
+  #   uuid: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+  #   cert: /etc/ssl/certs/server.crt
+  #   key: /etc/ssl/private/server.key
+  #
+  # ── 2-B Reality ──
+  # - name: vless-reality
+  #   type: vless
+  #   port: 443
+  #   uuid: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+  #   reality-private-key: YOUR_X25519_PRIVATE_KEY_BASE64URL
+  #   reality-short-ids: ["deadbeef", "cafebabe"]   # 1–8 字节 hex
+  #   reality-dest: "www.microsoft.com:443"
+  #   reality-server-name: "www.microsoft.com"
+  #   reality-max-time-diff: 90                     # 可选，秒；默认 90，0=不检查
+  #
+  # ── 2-C TLS + WebSocket ──
+  # - name: vless-ws
+  #   type: vless
+  #   port: 443
+  #   uuid: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+  #   transport: ws
+  #   path: /vless
+  #   host: your.domain.com
+  #   cert: /etc/ssl/certs/server.crt
+  #   key: /etc/ssl/private/server.key
+  #
+  # ── 2-D TLS + XHTTP ──
+  # - name: vless-xhttp
+  #   type: vless
+  #   port: 443
+  #   uuid: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+  #   transport: xhttp
+  #   path: /xhttp
+  #   host: your.domain.com
+  #   cert: /etc/ssl/certs/server.crt
+  #   key: /etc/ssl/private/server.key
+
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # 3. VMess
+  # ════════════════════════════════════════════════════════════════════════════
+  # - name: vmess-main
+  #   type: vmess
+  #   port: 8443
+  #   uuid: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+  #   transport: ws               # 可选，默认 tcp
+  #   path: /vmess
+  #   cert: /etc/ssl/certs/server.crt     # 可选；不配=明文
+  #   key: /etc/ssl/private/server.key
+
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # 4. Trojan
+  # ════════════════════════════════════════════════════════════════════════════
+  # - name: trojan-main
+  #   type: trojan
+  #   port: 443
+  #   password: your-trojan-password
+  #   cert: /etc/ssl/certs/server.crt
+  #   key: /etc/ssl/private/server.key
+
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # 5. Shadowsocks 2022
+  # ════════════════════════════════════════════════════════════════════════════
+  # method 取值：
+  #   2022-blake3-aes-128-gcm
+  #   2022-blake3-aes-256-gcm          # 默认
+  #   2022-blake3-chacha20-poly1305
+  #
+  # - name: ss-main
+  #   type: shadowsocks
+  #   port: 8388
+  #   password: your-ss2022-password
+  #   method: 2022-blake3-aes-256-gcm
+
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # 6. TUIC
+  # ════════════════════════════════════════════════════════════════════════════
+  # 时间字段支持 humantime：10s / 3s / 30s 等
+  #
+  # - name: tuic-main
+  #   type: tuic
+  #   port: 443
+  #   users:
+  #     - uuid: 11111111-1111-1111-1111-111111111111   # flux generate uuid
+  #       password: pass1
+  #     - uuid: 22222222-2222-2222-2222-222222222222
+  #       password: pass2
+  #   cert: /etc/ssl/certs/server.crt
+  #   key: /etc/ssl/private/server.key
+  #   # 以下均为可选（括号内为默认值）
+  #   max-idle-time: 30s            # (30s)
+  #   auth-timeout: 3s              # (3s)
+  #   udp-timeout: 30s              # (30s)
+  #   heartbeat: 10s                # (10s)
+  #   udp-relay-ipv6: false         # (false)
+  #   max-udp-packet-size: 65535    # (65535)
+
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # 7. WireGuard
+  # ════════════════════════════════════════════════════════════════════════════
+  # 注意：本协议不支持 outbound-* 字段
+  #
+  # - name: wg-main
+  #   type: wireguard
+  #   port: 51820
+  #   private-key: SERVER_PRIVATE_KEY_BASE64
+  #   server-address: ["10.0.0.1/24", "fd00::1/64"]   # 服务端在隧道内的地址
+  #   mtu: 1420
+  #   peers:
+  #     - public-key: CLIENT_PUBLIC_KEY_BASE64
+  #       # pre-shared-key: PSK_BASE64
+  #       allowed-ips: ["10.0.0.2/32", "fd00::2/128"]
+  #       keepalive-interval: 25      # 秒，可选
+  #       dns: ["1.1.1.1", "8.8.8.8"] # 可选，下发给对端的 DNS
+
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # 8. AnyTLS
+  # ════════════════════════════════════════════════════════════════════════════
+  # - name: anytls-main
+  #   type: anytls
+  #   port: 443
+  #   password: your-anytls-password
+  #   cert: /etc/ssl/certs/server.crt
+  #   key: /etc/ssl/private/server.key
+  #   # padding-scheme: "..."       # 可选填充方案字符串
+
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # 9. SOCKS5
+  # ════════════════════════════════════════════════════════════════════════════
+  # users 不填 = 无认证
+  #
+  # - name: socks-in
+  #   type: socks
+  #   listen: "127.0.0.1"
+  #   port: 1080
+  #   users:
+  #     - username: u1
+  #       password: p1
+
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # 10. HTTP CONNECT 代理
+  # ════════════════════════════════════════════════════════════════════════════
+  # users 不填 = 无认证；配置后要求 Proxy-Authorization: Basic
+  # 填了 cert/key（或 self-signed-domain）即为 HTTPS 代理，否则明文
+  #
+  # - name: http-in
+  #   type: http
+  #   port: 8080
+  #   users:
+  #     - username: u1
+  #       password: p1
+
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # 11. NaiveProxy（HTTP/2 CONNECT + Basic Auth）
+  # ════════════════════════════════════════════════════════════════════════════
+  # padding：双方都支持才生效；建议连通后再开
+  #
+  # - name: naive-main
+  #   type: naiveproxy
+  #   port: 443
+  #   users:
+  #     - username: u1
+  #       password: p1
+  #   cert: /etc/ssl/certs/server.crt
+  #   key: /etc/ssl/private/server.key
+  #   masquerade-url: "https://example.com"   # 可选：未认证请求反代到该站点，不填返回 404
+  #   masquerade-rewrite-host: true
+  #   padding: false
+
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # 12. ShadowQuic（0-RTT QUIC + JLS SNI 伪装）
+  # ════════════════════════════════════════════════════════════════════════════
+  # jls-upstream 必须是真实 HTTPS 站点；未认证流量转发到该上游
+  # congestion-control: bbr | cubic | new-reno | brutal
+  #
+  # - name: sq-in
+  #   type: shadowquic
+  #   port: 443
+  #   users:
+  #     - username: user1
+  #       password: pass1
+  #   jls-upstream: "google.com:443"
+  #   server-name: "google.com"       # 可选：留空则从 jls-upstream 推断
+  #   # 以下均为可选（括号内为默认值）
+  #   alpn: ["h3"]                    # (["h3"])
+  #   zero-rtt: true                  # (true)
+  #   congestion-control: bbr         # (bbr)
+  #   initial-mtu: 1300               # (1300)
+  #   min-mtu: 1290                   # (1290)
+  #   gso: true                       # (true)
+  #   mtu-discovery: true             # (true)
+  #   blackhole-detection: false      # (false)
+  #   udp-relay-ipv6: false           # (false)
+  #   udp-timeout: 30s                # (30s)
+
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # 13. Spectre（QUIC + JLS 伪装 + Brutal 拥塞控制）
+  # ════════════════════════════════════════════════════════════════════════════
+  # 认证失败的 QUIC 握手被透明转发到 upstream（真实站点），探测者看到正常网站
+  # password / server-name 必须与客户端一致；Brutal 速率取客户端声明的下载速率
+  # 生成密码：flux generate password
+  #
+  # - name: sp-in
+  #   type: spectre
+  #   port: 4433
+  #   password: your-strong-password-here
+  #   username: spectre                # 可选（spectre）；留空则不校验用户名
+  #   server-name: www.cloudflare.com  # SNI，须与客户端一致
+  #   upstream: www.cloudflare.com:443 # 未认证流量转发到此，须支持 HTTP/3
+  #   # 以下均为可选（括号内为默认值）
+  #   obfs-psk: "at-least-4-bytes"     # Salamander 报文混淆 PSK，须与客户端一致
+  #   udp-timeout: 120s                # (120s) UDP 会话空闲超时
+  #   udp-relay-ipv6: false            # (false) 是否中继 IPv6 UDP
+
+
+  # ── 最小可运行示例（请改密码后使用；或注释掉并启用上方某一完整块）──────────
+  - name: hy2-demo
+    type: hysteria2
+    port: 443
+    password: change-me
+    self-signed-domain: hy2.example.com
