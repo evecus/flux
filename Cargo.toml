@@ -141,8 +141,9 @@ smoltcp = { version = "0.11", default-features = false, features = [
 ] }
 
 [profile.release]
-strip = "symbols"
+strip = true
 debug = false
 panic = "abort"
 codegen-units = 1
 lto = true
+opt-level = 2
