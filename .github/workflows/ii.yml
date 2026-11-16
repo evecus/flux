@@ -33,7 +33,7 @@ jobs:
           VERSION: ${{ github.event.inputs.version }}
         run: |
           V="${VERSION#v}"
-          sed -i "0,/^\[/{s/^version[[:space:]]*=.*/version = \"${V}\"/}" Cargo.toml
+          sed -i '/^\[package\]/,/^\[/{/^\[package\]/!{s/^version[[:space:]]*=.*/version = "'"${V}"'"/}}' Cargo.toml
           cat Cargo.toml
       
       - name: Update Cargo.lock
