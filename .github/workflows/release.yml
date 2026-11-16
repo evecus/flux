@@ -11,8 +11,8 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  BIN_NAME: cloudone
-  RELEASE_NAME: CloudOne
+  BIN_NAME: flux
+  RELEASE_NAME: flux
 
 jobs:
   build:
