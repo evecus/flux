@@ -1,0 +1,864 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>flux · 控制面板</title>
+<style>
+:root{--ink:#0f172a;--mut:#64748b;--line:#e8edf5;--brand:#4f46e5;--cyan:#06b6d4;--ok:#10b981;--idle:#cbd5e1;--bad:#ef4444;--card:#fff;--sidebar:#0f172a}
+*{box-sizing:border-box}
+body{margin:0;font-family:system-ui,-apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;color:var(--ink);background:#f6f8fc;font-size:14px;line-height:1.5}
+.app{display:flex;min-height:100vh}
+/* ── 侧栏 ── */
+.sidebar{width:216px;flex:none;background:var(--sidebar);color:#cbd5e1;display:flex;flex-direction:column;position:fixed;inset:0 auto 0 0;z-index:40}
+.brand{display:flex;align-items:center;gap:11px;padding:22px 20px;border-bottom:1px solid rgba(255,255,255,.07)}
+.brand .logo{width:36px;height:36px;border-radius:11px;background:linear-gradient(135deg,var(--brand),var(--cyan));display:grid;place-items:center;color:#fff;font-weight:800;font-size:18px}
+.brand b{color:#fff;font-size:16px;letter-spacing:.3px}
+.brand small{display:block;color:#64748b;font-size:10px;font-weight:500}
+.nav{padding:12px 10px;display:flex;flex-direction:column;gap:4px;flex:1}
+.nav a{display:flex;align-items:center;gap:12px;padding:11px 13px;border-radius:10px;color:#94a3b8;text-decoration:none;font-size:13px;font-weight:600;cursor:pointer;transition:.15s}
+.nav a:hover{background:rgba(255,255,255,.05);color:#e2e8f0}
+.nav a.active{background:linear-gradient(135deg,rgba(79,70,229,.9),rgba(79,70,229,.7));color:#fff;box-shadow:0 6px 16px rgba(79,70,229,.28)}
+.nav a svg{width:18px;height:18px;flex:none}
+.side-foot{padding:14px 20px;border-top:1px solid rgba(255,255,255,.07);font-size:11px;color:#475569}
+/* ── 主区 ── */
+.main{flex:1;margin-left:216px;min-width:0}
+.topbar{display:none}
+.hamb{display:none}
+.wrap{max-width:1180px;margin:0 auto;padding:22px}
+.page{display:none}
+.page.active{display:block}
+.ph-page{display:flex;align-items:center;gap:12px;margin-bottom:20px;flex-wrap:wrap}
+.ph-page h1{font-size:21px;margin:0;font-weight:750;letter-spacing:.2px}
+.ph-page .sub{color:var(--mut);font-size:12px}
+.spacer{flex:1}
+.pill{display:inline-flex;align-items:center;gap:6px;background:#ecfdf5;color:#047857;border:1px solid #d1fae5;border-radius:999px;padding:5px 11px;font-size:12px;font-weight:600}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 3px rgba(16,185,129,.15)}
+.btn{border:1px solid var(--line);background:#fff;color:var(--mut);border-radius:9px;padding:7px 13px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;transition:.18s;white-space:nowrap}
+.btn:hover{border-color:var(--brand);color:var(--brand)}
+.btn.primary{background:var(--brand);color:#fff;border-color:var(--brand)}
+.btn.primary:hover{background:#4338ca;color:#fff}
+.btn.active{background:#eef2ff;border-color:#c7d2fe;color:var(--brand)}
+.btn.danger{color:var(--bad);border-color:#fecaca}
+.btn.danger:hover{background:#fef2f2;border-color:var(--bad)}
+.btn.mini{padding:4px 9px;font-size:11px}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+/* ── 卡片 / KPI ── */
+.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:15px}
+.kpi{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:16px 17px;box-shadow:0 2px 10px rgba(15,23,42,.04);position:relative;overflow:hidden;animation:fxin .5s both}
+.kpi:nth-child(2){animation-delay:.06s}.kpi:nth-child(3){animation-delay:.12s}.kpi:nth-child(4){animation-delay:.18s}
+.kpi::after{content:"";position:absolute;right:-24px;top:-24px;width:76px;height:76px;border-radius:50%;background:radial-gradient(circle,rgba(79,70,229,.09),transparent 70%)}
+.kpi .k{color:var(--mut);font-size:12px}
+.kpi .v{font-size:26px;font-weight:780;margin-top:6px;letter-spacing:-.5px;font-variant-numeric:tabular-nums}
+.kpi .v small{font-size:13px;font-weight:600;color:var(--mut);margin-left:3px}
+.kpi .t{font-size:11px;color:var(--mut);margin-top:4px}
+.grid{display:grid;grid-template-columns:1.25fr 1fr;gap:14px;margin-bottom:14px}
+.panel{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:17px;box-shadow:0 2px 10px rgba(15,23,42,.04);animation:fxin .55s both;margin-bottom:14px}
+.grid .panel{margin-bottom:0}
+.ph{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:14px}
+.ph h3{margin:0;font-size:14px;font-weight:700}
+.ph .hint{font-size:11px;color:var(--mut)}
+.seg{display:flex;gap:5px}
+.legend{display:flex;gap:14px;font-size:11px;color:var(--mut);flex-wrap:wrap}
+.legend i{display:inline-block;width:8px;height:8px;border-radius:3px;margin-right:5px}
+svg.chart{width:100%;height:auto;display:block}
+.nrow{display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px dashed var(--line)}
+.nrow:last-child{border-bottom:0}
+.badge{font-size:10px;font-weight:700;padding:3px 8px;border-radius:7px;background:#eef2ff;color:var(--brand);white-space:nowrap;text-transform:uppercase}
+.nname{font-weight:650;font-size:13px}
+.naddr{font-size:11px;color:var(--mut);font-variant-numeric:tabular-nums}
+.nstat{margin-left:auto;text-align:right;font-size:11px;color:var(--mut);white-space:nowrap}
+.nstat b{display:block;color:var(--ink);font-size:13px;font-variant-numeric:tabular-nums}
+.st{width:8px;height:8px;border-radius:50%;flex:none}
+.st.on{background:var(--ok);box-shadow:0 0 0 3px rgba(16,185,129,.14)}
+.st.off{background:var(--idle);box-shadow:0 0 0 3px rgba(148,163,184,.12)}
+table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+th{text-align:left;font-size:11px;color:var(--mut);font-weight:600;padding:0 8px 9px 0;border-bottom:1px solid var(--line)}
+td{font-size:12px;padding:10px 8px 10px 0;border-bottom:1px solid #f1f5f9;vertical-align:middle}
+tr:last-child td{border-bottom:0}
+td .ops{display:flex;gap:5px;justify-content:flex-end}
+.ip{font-weight:650}
+.tag{font-size:10px;color:var(--mut);background:#f1f5f9;border-radius:6px;padding:2px 7px}
+.mono{font-variant-numeric:tabular-nums;color:var(--mut)}
+.month{display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px dashed var(--line);flex-wrap:wrap}
+.month:last-child{border-bottom:0}
+.month .m{font-weight:650;font-size:13px;min-width:92px}
+.month .v{font-size:12px;color:var(--mut);flex:1}
+.empty{color:var(--mut);font-size:12px;padding:14px 0;text-align:center}
+.err{display:none;background:#fef2f2;color:#b91c1c;border:1px solid #fecaca;border-radius:10px;padding:9px 12px;font-size:12px;margin-bottom:14px}
+.foot{display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;color:var(--mut);font-size:11px;margin-top:4px;padding-top:12px;border-top:1px solid var(--line)}
+@keyframes fxin{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+/* ── 弹窗 ── */
+.mask{display:none;position:fixed;inset:0;background:rgba(15,23,42,.5);z-index:60;align-items:flex-start;justify-content:center;padding:5vh 16px;overflow:auto}
+.mask.show{display:flex}
+.modal{background:#fff;border-radius:18px;width:100%;max-width:640px;box-shadow:0 24px 60px rgba(0,0,0,.25);animation:fxin .25s both;overflow:hidden}
+.modal.wide{max-width:820px}
+.modal-hd{display:flex;align-items:center;gap:10px;padding:18px 20px;border-bottom:1px solid var(--line);position:sticky;top:0;background:#fff;z-index:2}
+.modal-hd h3{margin:0;font-size:16px;font-weight:750}
+.modal-hd .x{margin-left:auto;border:0;background:#f1f5f9;width:30px;height:30px;border-radius:8px;cursor:pointer;font-size:17px;color:var(--mut)}
+.modal-bd{padding:20px;max-height:70vh;overflow:auto}
+.modal-ft{display:flex;gap:8px;justify-content:flex-end;padding:14px 20px;border-top:1px solid var(--line);background:#fafbfe}
+.fld{margin-bottom:14px;position:relative}
+.fld.adv{display:none}
+.fld.show{display:block}
+.fld input[data-genbtn]{padding-right:74px}
+.genbtn{position:absolute;right:6px;top:26px;border:1px solid var(--brand);background:#eef2ff;color:var(--brand);border-radius:7px;padding:3px 8px;font-size:11px;font-weight:650;cursor:pointer;font-family:inherit;line-height:1.4}
+.genbtn:hover{background:#e0e7ff}
+.lrow .genbtn{top:22px;right:4px;padding:2px 6px;font-size:10px}
+.lrow .fld input[data-genbtn]{padding-right:56px}
+.fld > label{display:block;font-size:12px;font-weight:650;color:#334155;margin-bottom:5px}
+.fld input[type=text],.fld input[type=password],.fld input[type=number],.fld select,.fld textarea{width:100%;border:1px solid var(--line);border-radius:9px;padding:8px 10px;font-size:13px;font-family:inherit;color:var(--ink);background:#fff;outline:none}
+.fld input:focus,.fld select:focus,.fld textarea:focus{border-color:var(--brand);box-shadow:0 0 0 3px rgba(79,70,229,.1)}
+.fld textarea{resize:vertical;min-height:56px}
+.fld .hint2{font-size:11px;color:var(--mut);margin-top:3px}
+.chk{display:flex;align-items:center;gap:8px;font-size:13px}
+.chk input{width:16px;height:16px;accent-color:var(--brand)}
+.sec-title{font-size:11px;font-weight:750;color:var(--brand);text-transform:uppercase;letter-spacing:.6px;margin:18px 0 10px;padding-top:12px;border-top:1px dashed var(--line)}
+.sec-title:first-child{margin-top:0;border-top:0;padding-top:0}
+.toggle-adv{font-size:11px;color:var(--brand);cursor:pointer;user-select:none;margin-left:8px}
+.lrow{display:flex;gap:6px;align-items:flex-end;margin-bottom:8px;padding:8px;background:#f8fafc;border-radius:10px;flex-wrap:wrap}
+.lrow .fld{margin:0;flex:1;min-width:110px}
+.lrow .btn{align-self:flex-end;margin-bottom:1px}
+.proto-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.proto-opt{display:flex;align-items:center;gap:8px;font-size:13px;padding:8px;background:#f8fafc;border:1px solid var(--line);border-radius:10px}
+.proto-opt label{font-weight:650}
+.proto-opt .mini-fields{display:flex;gap:6px;margin-left:auto}
+.proto-opt select{font-size:11px;padding:4px 6px;border:1px solid var(--line);border-radius:6px;background:#fff;max-width:92px}
+.toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#0f172a;color:#fff;padding:11px 18px;border-radius:10px;font-size:13px;z-index:100;opacity:0;transition:.25s;pointer-events:none;box-shadow:0 8px 24px rgba(0,0,0,.25)}
+.toast.show{opacity:1}
+.overlay{display:none;position:fixed;inset:0;background:rgba(15,23,42,.4);z-index:35}
+.overlay.show{display:block}
+@media(max-width:900px){.grid{grid-template-columns:1fr}}
+@media(max-width:760px){
+  .sidebar{transform:translateX(-100%);transition:transform .25s;box-shadow:8px 0 30px rgba(0,0,0,.2)}
+  .sidebar.open{transform:none}
+  .main{margin-left:0}
+  .topbar{display:flex;align-items:center;gap:12px;padding:12px 14px;background:#fff;border-bottom:1px solid var(--line);position:sticky;top:0;z-index:30}
+  .hamb{display:grid;place-items:center;width:38px;height:38px;border:1px solid var(--line);border-radius:10px;background:#fff;cursor:pointer}
+  .hamb svg{width:20px;height:20px}
+  .topbar b{font-size:15px}
+  .wrap{padding:14px}
+  .kpis{grid-template-columns:repeat(2,1fr)}
+  .kpi .v{font-size:22px}
+  .ph-page h1{font-size:18px}
+  .proto-grid{grid-template-columns:1fr}
+  table thead{display:none}
+  table tr{display:grid;grid-template-columns:1fr auto;gap:2px;padding:9px 0;border-bottom:1px solid #f1f5f9}
+  table td{border:0;padding:2px 0}
+  table td:nth-child(2){text-align:right}
+  .modal-bd{padding:14px}
+}
+</style>
+</head>
+<body>
+<div class="overlay" id="overlay"></div>
+<div class="app">
+  <!-- 侧栏 -->
+  <aside class="sidebar" id="sidebar">
+    <div class="brand"><div class="logo">f</div><div><b>flux</b><small>节点控制面板</small></div></div>
+    <nav class="nav" id="nav">
+      <a data-page="dash" class="active"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>仪表盘</a>
+      <a data-page="nodes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="6" rx="2"/><rect x="2" y="14" width="20" height="6" rx="2"/><circle cx="6" cy="7" r="1" fill="currentColor"/><circle cx="6" cy="17" r="1" fill="currentColor"/></svg>节点管理</a>
+      <a data-page="ssl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-4"/></svg>SSL 证书</a>
+      <a data-page="conns"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/></svg>连接信息</a>
+      <a data-page="traffic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18"/><path d="M7 15l4-5 3 3 5-7"/></svg>流量统计</a>
+      <a data-page="settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>设置</a>
+    </nav>
+    <div class="side-foot">flux · Web 面板</div>
+  </aside>
+
+  <!-- 主区 -->
+  <div class="main">
+    <div class="topbar"><button class="hamb" id="hamb"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12h18M3 6h18M3 18h18"/></svg></button><b>flux 面板</b><span class="spacer"></span><span class="pill"><span class="dot"></span><span id="statusTop">—</span></span></div>
+    <div class="wrap">
+      <div class="err" id="err"></div>
+
+      <!-- 仪表盘 -->
+      <section class="page active" id="page-dash">
+        <div class="ph-page"><h1>仪表盘</h1><span class="sub">实时状态 / 运行信息</span><span class="spacer"></span><span class="pill"><span class="dot"></span><span id="status">加载中</span></span><button class="btn" id="logout">退出</button></div>
+        <div class="kpis">
+          <div class="kpi"><div class="k">在线节点</div><div class="v" id="k1">—</div><div class="t" id="k1t">有客户端连接视为在线</div></div>
+          <div class="kpi"><div class="k">近 24 小时流量</div><div class="v" id="k2">—</div><div class="t" id="k2t">↑ — · ↓ —</div></div>
+          <div class="kpi"><div class="k">活跃连接</div><div class="v" id="k3">—</div><div class="t" id="k3t">当前进行中的会话</div></div>
+          <div class="kpi"><div class="k">历史独立 IP</div><div class="v" id="k4">—</div><div class="t" id="k4t">持久化记录</div></div>
+        </div>
+        <div class="grid">
+          <div class="panel">
+            <div class="ph"><h3>流量趋势</h3><div class="seg"><button class="btn active" data-range="24h">24 小时</button><button class="btn" data-range="30d">30 天</button><button class="btn" data-range="month">按月</button></div></div>
+            <div class="ph" style="margin-bottom:4px"><div class="legend"><span><i style="background:#4f46e5"></i>上行（客户端→服务端）</span><span><i style="background:#06b6d4"></i>下行（服务端→客户端）</span></div><span class="hint" id="chartHint">近 24 小时</span></div>
+            <svg class="chart" id="chart" viewBox="0 0 600 180" preserveAspectRatio="none" role="img" aria-label="流量趋势图"></svg>
+          </div>
+          <div class="panel"><div class="ph"><h3>节点在线情况</h3><span class="hint" id="nodeHint">—</span></div><div id="nodes"><div class="empty">加载中…</div></div></div>
+        </div>
+        <div class="foot"><span id="footL">—</span><span>数据持久化于 redb</span></div>
+      </section>
+
+      <!-- 节点管理 -->
+      <section class="page" id="page-nodes">
+        <div class="ph-page"><h1>节点管理</h1><span class="sub">增加 / 编辑 / 删除节点，保存后立即生效</span><span class="spacer"></span><button class="btn" id="btnQuick">⚡ 一键配置</button><button class="btn primary" id="btnAdd">+ 新增节点</button></div>
+        <div class="panel"><table><thead><tr><th>节点</th><th>协议</th><th>监听</th><th>状态</th><th>连接</th><th>流量</th><th style="text-align:right">操作</th></tr></thead><tbody id="nodeTable"><tr><td colspan="7" class="empty">加载中…</td></tr></tbody></table></div>
+      </section>
+
+      <!-- SSL 证书 -->
+      <section class="page" id="page-ssl">
+        <div class="ph-page"><h1>SSL 证书</h1><span class="sub">Let's Encrypt DNS-01（Cloudflare）自动申请与续签</span><span class="spacer"></span><button class="btn primary" id="btnAddCert">+ 申请证书</button></div>
+        <div class="panel"><table><thead><tr><th>域名</th><th>状态</th><th>到期时间</th><th>自动续签</th><th>引用节点</th><th style="text-align:right">操作</th></tr></thead><tbody id="certTable"><tr><td colspan="6" class="empty">加载中…</td></tr></tbody></table></div>
+        <div class="panel">
+          <div class="ph"><h3>说明</h3></div>
+          <div class="hint2" style="line-height:1.9">
+            · 需要 <b>Cloudflare API Token</b>（权限：Zone → DNS → Edit，作用于目标域名的 zone）。<br>
+            · 申请通过 DNS-01 验证，<b>无需开放 80/443 端口</b>，支持泛域名 <code>*.example.com</code>（泛域名必须与主域名一起申请，如 <code>example.com,*.example.com</code>）。<br>
+            · 证书与私钥加密存于数据库，同时在 <code>&lt;数据目录&gt;/certs/&lt;id&gt;.crt|.key</code> 落盘。<br>
+            · 节点编辑 TLS 模式选「外部证书」时可直接引用这里的证书；证书续签后引用节点<b>自动热重载</b>，无需重启。
+          </div>
+        </div>
+      </section>
+
+      <!-- 连接信息 -->
+      <section class="page" id="page-conns">
+        <div class="ph-page"><h1>连接信息</h1><span class="sub">最近连接 IP</span><span class="spacer"></span><span class="pill"><span class="dot"></span><span>每 5 秒自动刷新</span></span></div>
+        <div class="panel"><table><thead><tr><th>客户端 IP</th><th>节点</th><th>目标</th><th>时间 / 时长</th></tr></thead><tbody id="conns"><tr><td colspan="4" class="empty">加载中…</td></tr></tbody></table></div>
+      </section>
+
+      <!-- 流量统计 -->
+      <section class="page" id="page-traffic">
+        <div class="ph-page"><h1>流量统计</h1><span class="sub">趋势 / 按月汇总 / 数据清理</span></div>
+        <div class="panel">
+          <div class="ph"><h3>流量趋势</h3><div class="seg"><button class="btn active" data-range="24h">24 小时</button><button class="btn" data-range="30d">30 天</button><button class="btn" data-range="month">按月</button></div></div>
+          <div class="ph" style="margin-bottom:4px"><div class="legend"><span><i style="background:#4f46e5"></i>上行</span><span><i style="background:#06b6d4"></i>下行</span></div><span class="hint" id="chartHint2">近 24 小时</span></div>
+          <svg class="chart" id="chart2" viewBox="0 0 600 180" preserveAspectRatio="none" role="img" aria-label="流量趋势图"></svg>
+        </div>
+        <div class="panel"><div class="ph"><h3>按月统计与数据清理</h3><span class="hint">数据不会自动清理，需手动执行</span></div><div id="months"><div class="empty">加载中…</div></div><div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap"><button class="btn danger" id="clearAll">清空全部历史数据</button><span class="hint" style="align-self:center">合计 <b class="mono" id="allTotal">—</b> · 连接 <b class="mono" id="allConns">—</b> 次</span></div></div>
+      </section>
+
+      <!-- 设置 -->
+      <section class="page" id="page-settings">
+        <div class="ph-page"><h1>设置</h1><span class="sub">修改 Web 登录凭据与面板端口，保存后立即生效</span></div>
+        <div class="panel" style="max-width:520px">
+          <div class="fld"><label>登录用户</label><input type="text" id="setUser" autocomplete="username"></div>
+          <div class="fld"><label>新密码</label><input type="password" id="setPass" autocomplete="new-password" placeholder="留空则不修改密码"><div class="hint2">修改成功后当前会话失效，需要用新凭据重新登录。</div></div>
+          <div class="fld"><label>面板端口</label><input type="number" id="setPort" min="1" max="65535" placeholder="留空则不修改端口"><div class="hint2">修改后面板将在新端口重新监听，请用新端口重新访问。</div></div>
+          <div style="display:flex;gap:8px;margin-top:16px"><button class="btn primary" id="saveSettings">保存设置</button></div>
+        </div>
+      </section>
+    </div>
+  </div>
+</div>
+
+<!-- 节点编辑弹窗 -->
+<div class="mask" id="editMask">
+  <div class="modal wide">
+    <div class="modal-hd"><h3 id="editTitle">编辑节点</h3><button class="x" data-close="editMask">×</button></div>
+    <div class="modal-bd" id="editBody"></div>
+    <div class="modal-ft"><label class="toggle-adv" id="toggleAdv">显示高级选项 ▾</label><span class="spacer"></span><button class="btn" data-close="editMask">取消</button><button class="btn primary" id="saveNode">保存并生效</button></div>
+  </div>
+</div>
+
+<!-- 一键配置弹窗 -->
+<div class="mask" id="quickMask">
+  <div class="modal">
+    <div class="modal-hd"><h3>⚡ 一键配置</h3><button class="x" data-close="quickMask">×</button></div>
+    <div class="modal-bd">
+      <div class="hint2" style="margin-bottom:12px">勾选要部署的协议，随机生成凭据后立即生效。TLS 默认随机使用大厂域名自动签发自签证书。</div>
+      <div class="proto-grid" id="protoGrid"></div>
+      <div class="fld" style="margin-top:16px"><label>起始端口（自动避让已占用端口）</label><input type="number" id="quickPort" value="443"></div>
+    </div>
+    <div class="modal-ft"><button class="btn" data-close="quickMask">取消</button><button class="btn primary" id="doQuick">部署选中协议</button></div>
+  </div>
+</div>
+
+<!-- 导出分享链接弹窗 -->
+<div class="mask" id="exportMask">
+  <div class="modal">
+    <div class="modal-hd"><h3>🔗 导出节点链接</h3><button class="x" data-close="exportMask">×</button></div>
+    <div class="modal-bd">
+      <div class="hint2" style="margin-bottom:12px" id="exportNodeName"></div>
+      <div class="fld"><label>对外地址（域名或 IP，不含端口）</label><input type="text" id="exportHost" placeholder="例如 example.com 或 1.2.3.4"><div class="hint2">客户端用它连接本服务器。已自动检测并填入服务器 IP（公网 IPv4 → IPv6 → 内网），可修改。</div></div>
+      <div class="fld"><label>分享链接</label><textarea id="exportLink" readonly style="min-height:80px;word-break:break-all"></textarea></div>
+    </div>
+    <div class="modal-ft"><button class="btn" data-close="exportMask">关闭</button><button class="btn" id="copyExport">复制链接</button><button class="btn primary" id="genExport">生成链接</button></div>
+  </div>
+</div>
+
+<!-- SSL 证书申请弹窗 -->
+<div class="mask" id="sslMask">
+  <div class="modal">
+    <div class="modal-hd"><h3 id="sslTitle">申请 SSL 证书</h3><button class="x" data-close="sslMask">×</button></div>
+    <div class="modal-bd">
+      <div class="fld"><label>域名 *（多个用逗号分隔）</label><input type="text" id="sslDomains" placeholder="example.com,*.example.com"><div class="hint2">首个为证书主域名；泛域名需与主域名一起申请。</div></div>
+      <div class="fld"><label>ACME 账户邮箱 *</label><input type="text" id="sslEmail" placeholder="you@example.com"></div>
+      <div class="fld"><label>Cloudflare API Token *</label><input type="password" id="sslToken" placeholder="Zone → DNS → Edit 权限"><div class="hint2">Token 加密存于数据库，仅用于 TXT 记录增删与续签。</div></div>
+      <div class="fld"><label>Zone ID（可选）</label><input type="text" id="sslZone" placeholder="留空则自动按域名匹配 zone"><div class="hint2">Cloudflare 域名概览页右下角可找到。</div></div>
+      <div class="fld"><label class="chk"><input type="checkbox" id="sslAuto" checked> 到期前 30 天自动续签并热重载引用节点</label></div>
+    </div>
+    <div class="modal-ft"><button class="btn" data-close="sslMask">取消</button><button class="btn primary" id="doSslCreate">提交申请</button></div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+let range='24h', timer=null, curEditName=null;
+const $=id=>document.getElementById(id);
+const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function fmtBytes(n){n=Number(n)||0;if(n<1024)return n+' B';const u=['KB','MB','GB','TB','PB'];let i=-1;do{n/=1024;i++}while(n>=1024&&i<u.length-1);return (n>=10?n.toFixed(1):n.toFixed(2))+' '+u[i]}
+function fmtTime(ms){if(!ms)return '—';const d=new Date(ms);return d.toLocaleString('zh-CN',{hour12:false,month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'})}
+function fmtDur(ms){ms=Number(ms)||0;if(ms<1000)return ms+'ms';if(ms<60000)return (ms/1000).toFixed(1)+'s';if(ms<3600000)return Math.floor(ms/60000)+'m'+Math.floor(ms%60000/1000)+'s';return Math.floor(ms/3600000)+'h'+Math.floor(ms%3600000/60000)+'m'}
+function fmtUptime(ms){const s=Math.floor((Date.now()-ms)/1000);if(s<60)return s+' 秒';if(s<3600)return Math.floor(s/60)+' 分钟';if(s<86400)return Math.floor(s/3600)+' 小时 '+Math.floor(s%3600/60)+' 分';return Math.floor(s/86400)+' 天 '+Math.floor(s%86400/3600)+' 小时'}
+async function api(path,opts){const r=await fetch(path,opts);if(r.status===401){location.href='/login';throw new Error('未登录')}const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||('HTTP '+r.status));return j}
+function showErr(e){const el=$('err');el.style.display='block';el.textContent='操作失败：'+(e.message||e);setTimeout(()=>el.style.display='none',7000)}
+function toast(msg){const t=$('toast');t.textContent=msg;t.classList.add('show');clearTimeout(t._t);t._t=setTimeout(()=>t.classList.remove('show'),2200)}
+
+/* ── 导航 ── */
+function go(page){
+  document.querySelectorAll('.page').forEach(p=>p.classList.toggle('active',p.id==='page-'+page));
+  document.querySelectorAll('#nav a').forEach(a=>a.classList.toggle('active',a.dataset.page===page));
+  closeDrawer();
+  if(page==='nodes'||page==='conns'||page==='traffic'||page==='ssl')refreshPage(page);
+}
+function openDrawer(){$('sidebar').classList.add('open');$('overlay').classList.add('show')}
+function closeDrawer(){$('sidebar').classList.remove('open');$('overlay').classList.remove('show')}
+document.querySelectorAll('#nav a').forEach(a=>a.onclick=()=>go(a.dataset.page));
+$('hamb').onclick=openDrawer; $('overlay').onclick=closeDrawer;
+document.querySelectorAll('[data-close]').forEach(b=>b.onclick=()=>$(b.dataset.close).classList.remove('show'));
+document.querySelectorAll('.mask').forEach(m=>m.onclick=e=>{if(e.target===m)m.classList.remove('show')});
+document.querySelectorAll('[data-range]').forEach(b=>b.onclick=()=>{
+  range=b.dataset.range;
+  document.querySelectorAll('[data-range]').forEach(x=>x.classList.toggle('active',x===b));
+  drawCharts();
+});
+$('logout').onclick=async()=>{try{await fetch('/api/logout',{method:'POST'})}catch(_){}location.href='/login'};
+
+/* ── 图表 ── */
+function buildSeries(points){
+  const now=Date.now(), nowHour=Math.floor(now/3600000), map=new Map();
+  for(const p of points){const b=p.key.split('|')[0];let k;
+    if(range==='month')k=String(b);else if(range==='30d')k=String(Math.floor(Number(b)/24));else k=String(Number(b));
+    const c=map.get(k)||{up:0,down:0};c.up+=p.up;c.down+=p.down;map.set(k,c);}
+  let keys=[];
+  if(range==='month')keys=[...map.keys()].sort().slice(-12);
+  else if(range==='30d'){const t=Math.floor(nowHour/24);for(let i=29;i>=0;i--)keys.push(String(t-i))}
+  else{for(let i=23;i>=0;i--)keys.push(String(nowHour-i))}
+  const labels=keys.map(k=>range==='month'?k.slice(0,4)+'-'+k.slice(4):range==='30d'?(new Date(Number(k)*86400000).getMonth()+1)+'/'+new Date(Number(k)*86400000).getDate():String(new Date(Number(k)*3600000).getHours()).padStart(2,'0')+':00');
+  return {labels,up:keys.map(k=>(map.get(k)||{up:0}).up),down:keys.map(k=>(map.get(k)||{down:0}).down)};
+}
+function drawChart(svgId,s){
+  const el=$(svgId);if(!el)return;
+  const W=600,H=180,L=8,R=8,T=12,B=22,max=Math.max(1,...s.up,...s.down),n=s.up.length;
+  const X=i=>L+i*(W-L-R)/Math.max(1,n-1), Y=v=>T+(1-v/max)*(H-T-B);
+  const pts=a=>a.map((v,i)=>X(i)+' '+Y(v)).join(' L ');
+  const area=a=>'M '+pts(a)+' L '+X(n-1)+' '+(H-B)+' L '+X(0)+' '+(H-B)+' Z';
+  let g='';for(let i=0;i<4;i++){const y=T+i*(H-T-B)/3;g+='<line x1="0" y1="'+y+'" x2="600" y2="'+y+'" stroke="#eef2f7" stroke-width="1"/>'}
+  const defs='<defs><linearGradient id="gU'+svgId+'" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#4f46e5" stop-opacity=".22"/><stop offset="1" stop-color="#4f46e5" stop-opacity="0"/></linearGradient><linearGradient id="gD'+svgId+'" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#06b6d4" stop-opacity=".18"/><stop offset="1" stop-color="#06b6d4" stop-opacity="0"/></linearGradient></defs>';
+  const body=(n>0)?'<path d="'+area(s.up)+'" fill="url(#gU'+svgId+')"/><path d="M '+pts(s.up)+'" fill="none" stroke="#4f46e5" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/><path d="'+area(s.down)+'" fill="url(#gD'+svgId+')"/><path d="M '+pts(s.down)+'" fill="none" stroke="#06b6d4" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>':'';
+  const labs=s.labels.length?[0,Math.floor((s.labels.length-1)/2),s.labels.length-1].filter((v,i,a)=>a.indexOf(v)===i):[];
+  const xl=labs.map(i=>'<text x="'+X(i)+'" y="'+(H-5)+'" fill="#94a3b8" font-size="11" font-family="system-ui" text-anchor="'+(i===0?'start':i===s.labels.length-1?'end':'middle')+'">'+esc(s.labels[i])+'</text>').join('');
+  const yl='<text x="596" y="'+(T+10)+'" fill="#94a3b8" font-size="10" font-family="system-ui" text-anchor="end">'+fmtBytes(max)+'</text><text x="596" y="'+(H-B-3)+'" fill="#94a3b8" font-size="10" font-family="system-ui" text-anchor="end">0</text>';
+  el.innerHTML=defs+g+body+xl+yl;
+}
+let trData=null;
+async function drawCharts(){
+  const hint=range==='month'?'按月汇总':range==='30d'?'近 30 天':'近 24 小时';
+  $('chartHint').textContent=hint; if($('chartHint2'))$('chartHint2').textContent=hint;
+  if(!trData)return;
+  const s=buildSeries(trData.points||[]);drawChart('chart',s);drawChart('chart2',s);
+}
+
+/* ── 渲染 ── */
+function renderNodesMini(nodes){
+  $('nodeHint').textContent=nodes.filter(n=>n.online).length+' / '+nodes.length+' 在线';
+  if(!nodes.length){$('nodes').innerHTML='<div class="empty">配置中没有节点</div>';return}
+  $('nodes').innerHTML=nodes.map(n=>{
+    const addr=(n.listen&&n.listen!==''?(n.listen.includes(':')?'['+n.listen+']':n.listen):'::')+':'+n.port;
+    const last=n.last_conn_ms?('最近 '+fmtTime(n.last_conn_ms)):'尚无连接';
+    return '<div class="nrow"><span class="st '+(n.online?'on':'off')+'"></span><span class="badge">'+esc(n.proto)+'</span><div><div class="nname">'+esc(n.name)+'</div><div class="naddr">'+esc(addr)+' · '+last+'</div></div><div class="nstat"><b>'+n.active+'</b>连接 · '+fmtBytes(n.up+n.down)+'</div></div>';
+  }).join('');
+}
+function renderConns(rows){
+  if(!rows.length){$('conns').innerHTML='<tr><td colspan="4" class="empty">暂无连接记录</td></tr>';return}
+  $('conns').innerHTML=rows.map(r=>'<tr><td class="ip">'+esc(r.ip||'—')+'</td><td>'+esc(r.node)+'</td><td class="mono">'+esc(r.target||'—')+'</td><td class="mono">'+fmtTime(r.ts_ms)+' · '+fmtDur(r.duration_ms)+'</td></tr>').join('');
+}
+function renderMonths(points){
+  const map=new Map();for(const p of points){const m=p.key.split('|')[0];const c=map.get(m)||{up:0,down:0};c.up+=p.up;c.down+=p.down;map.set(m,c)}
+  const keys=[...map.keys()].sort().reverse();
+  $('months').innerHTML=keys.length?keys.map(k=>{const c=map.get(k),label=k.slice(0,4)+'-'+k.slice(4);return '<div class="month"><span class="m">'+esc(label)+'</span><span class="v">↑ '+fmtBytes(c.up)+' · ↓ '+fmtBytes(c.down)+' · 合计 '+fmtBytes(c.up+c.down)+'</span><button class="btn danger mini" data-month="'+esc(k)+'">清理该月</button></div>'}).join(''):'<div class="empty">暂无按月数据，产生流量后会出现在这里</div>';
+  document.querySelectorAll('[data-month]').forEach(b=>b.onclick=()=>doClear({month:Number(b.dataset.month)}));
+}
+async function renderNodeTable(){
+  const [detail,stats]=await Promise.all([api('/api/nodes/detail'),api('/api/nodes')]);
+  const statMap=new Map((stats||[]).map(n=>[n.name,n]));
+  if(!detail.length){$('nodeTable').innerHTML='<tr><td colspan="7" class="empty">还没有节点，点击「新增节点」或「一键配置」</td></tr>';return}
+  $('nodeTable').innerHTML=detail.map(n=>{
+    const s=statMap.get(n.name)||{online:false,active:0,up:0,down:0};
+    const addr=(n.listen||'::')+':'+n.port;
+    return '<tr><td class="ip">'+esc(n.name)+'</td><td><span class="badge">'+esc(n.type)+'</span></td><td class="mono">'+esc(addr)+'</td><td><span class="st '+(s.online?'on':'off')+'"></span> '+(s.online?'在线':'离线')+'</td><td class="mono">'+s.active+'</td><td class="mono">'+fmtBytes(s.up+s.down)+'</td><td><div class="ops"><button class="btn mini" data-export="'+esc(n.name)+'">导出</button><button class="btn mini" data-edit="'+esc(n.name)+'">编辑</button><button class="btn danger mini" data-del="'+esc(n.name)+'">删除</button></div></td></tr>';
+  }).join('');
+  document.querySelectorAll('[data-edit]').forEach(b=>b.onclick=()=>openEdit(b.dataset.edit,detail));
+  document.querySelectorAll('[data-del]').forEach(b=>b.onclick=()=>delNode(b.dataset.del));
+  document.querySelectorAll('[data-export]').forEach(b=>b.onclick=()=>openExport(b.dataset.export,detail));
+}
+async function doClear(body){
+  if(!confirm(body.month?'确定清理该月的流量与连接记录？不可撤销。':'确定清空全部历史数据？不可撤销。'))return;
+  try{await api('/api/data/clear',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});toast('已清理');await refreshAll()}catch(e){showErr(e)}
+}
+
+/* ── 刷新调度 ── */
+async function refreshAll(){
+  try{
+    const [sum,nodes,tr,conns,months]=await Promise.all([api('/api/summary'),api('/api/nodes'),api('/api/traffic?range='+range),api('/api/connections?limit=30'),api('/api/traffic?range=month')]);
+    $('k1').innerHTML=sum.nodes_online+'<small>/ '+sum.nodes_total+'</small>';$('k1t').textContent='运行 '+fmtUptime(sum.started_ms);
+    $('k2').textContent=fmtBytes(sum.last24_up+sum.last24_down);$('k2t').textContent='↑ '+fmtBytes(sum.last24_up)+' · ↓ '+fmtBytes(sum.last24_down);
+    $('k3').textContent=sum.active_conn;$('k3t').textContent='累计连接 '+sum.total_conns.toLocaleString()+' 次';
+    $('k4').textContent=sum.unique_ips.toLocaleString();$('k4t').textContent='累计流量 '+fmtBytes(sum.total_up+sum.total_down);
+    $('allTotal').textContent=fmtBytes(sum.total_up+sum.total_down);$('allConns').textContent=sum.total_conns.toLocaleString();
+    const t=new Date().toLocaleTimeString('zh-CN',{hour12:false});$('status').textContent='已同步 · '+t;$('statusTop').textContent='已同步 · '+t;
+    $('footL').textContent='累计 ↑ '+fmtBytes(sum.total_up)+' · ↓ '+fmtBytes(sum.total_down)+' · 数据持久化于 redb';
+    trData=tr;await drawCharts();renderNodesMini(nodes||[]);renderConns(conns||[]);renderMonths(months.points||[]);
+    if($('page-nodes').classList.contains('active'))await renderNodeTable();
+    if($('page-ssl').classList.contains('active'))await renderCertTable();
+  }catch(e){showErr(e)}
+}
+function refreshPage(page){if(page==='nodes')renderNodeTable().catch(showErr);if(page==='conns')api('/api/connections?limit=30').then(renderConns).catch(showErr);if(page==='traffic')api('/api/traffic?range=month').then(r=>renderMonths(r.points||[])).catch(showErr);if(page==='ssl')renderCertTable().catch(showErr)}
+
+/* ═══ SSL 证书 ═══ */
+let CERTS=[]; // 证书列表缓存（节点编辑表单的「面板证书」下拉用）
+async function loadCerts(){try{CERTS=await api('/api/certs')||[]}catch(e){CERTS=[]}}
+function certStatusBadge(st){
+  if(st==='active')return '<span class="badge" style="background:#ecfdf5;color:#047857">已签发</span>';
+  if(st==='pending')return '<span class="badge" style="background:#fffbeb;color:#b45309">申请中…</span>';
+  return '<span class="badge" style="background:#fef2f2;color:#b91c1c">失败</span>';
+}
+async function renderCertTable(){
+  await loadCerts();
+  // 同步节点列表以显示引用关系。
+  let detail=[];try{detail=await api('/api/nodes/detail')||[]}catch(e){}
+  if(!CERTS.length){$('certTable').innerHTML='<tr><td colspan="6" class="empty">还没有证书，点击「申请证书」</td></tr>';return}
+  $('certTable').innerHTML=CERTS.map(c=>{
+    const st=c.status||'error';
+    const exp=c['expires-at-ms']?fmtTime(c['expires-at-ms']):'—';
+    const days=c['expires-at-ms']?Math.max(0,Math.floor((c['expires-at-ms']-Date.now())/86400000)):null;
+    const refs=detail.filter(n=>n['cert-ref']===c.id).map(n=>esc(n.name)).join(', ')||'—';
+    const errMsg=(c.error&&c.status==='error')?'<div class="hint2" style="color:#b91c1c;margin-top:3px;word-break:break-all">'+esc(c.error)+'</div>':'';
+    return '<tr><td class="ip">'+esc((c.domains||[]).join(', '))+errMsg+'</td><td>'+certStatusBadge(st)+'</td><td class="mono">'+exp+(days!=null&&st==='active'?'（剩 '+days+' 天）':'')+'</td><td>'+(c['auto-renew']?'是':'否')+'</td><td>'+refs+'</td><td><div class="ops"><button class="btn mini" data-ssl-reissue="'+esc(c.id)+'">'+(st==='active'?'续签':'重试')+'</button><button class="btn danger mini" data-ssl-del="'+esc(c.id)+'">删除</button></div></td></tr>';
+  }).join('');
+  document.querySelectorAll('[data-ssl-reissue]').forEach(b=>b.onclick=async()=>{
+    try{await api('/api/certs/issue',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:b.dataset.sslReissue})});toast('已提交，申请约需 1~2 分钟');await renderCertTable()}catch(e){showErr(e)}
+  });
+  document.querySelectorAll('[data-ssl-del]').forEach(b=>b.onclick=async()=>{
+    if(!confirm('确定删除该证书？引用它的节点将无法再使用。'))return;
+    try{await api('/api/certs?id='+encodeURIComponent(b.dataset.sslDel),{method:'DELETE'});toast('已删除');await renderCertTable()}catch(e){showErr(e)}
+  });
+}
+$('btnAddCert').onclick=()=>{$('sslMask').classList.add('show')};
+$('doSslCreate').onclick=async()=>{
+  try{
+    const body={domains:$('sslDomains').value.trim(),email:$('sslEmail').value.trim(),'cf-token':$('sslToken').value.trim(),'zone-id':$('sslZone').value.trim(),'auto-renew':$('sslAuto').checked};
+    if(!body.domains||!body.email||!body['cf-token'])throw new Error('域名 / 邮箱 / Cloudflare Token 均为必填');
+    const r=await api('/api/certs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    $('sslMask').classList.remove('show');
+    $('sslDomains').value='';$('sslToken').value='';$('sslZone').value='';
+    toast('已提交申请，可在列表中观察状态');
+    await renderCertTable();
+  }catch(e){showErr(e)}
+};
+
+/* ═══ 节点编辑表单（13 协议全表单）═══ */
+// 字段名 → 后端 /api/gen 的 kind。某些字段需按上下文覆盖（wireguard 私钥带 extra 公钥、peer 公钥）。
+const GEN_BY_KEY={uuid:'uuid',password:'password','self-signed-domain':'domain','reality-private-key':'reality-key','reality-short-ids':'shortid','private-key':'wg-key','public-key':'wgpub',cert:null,key:null};
+const F=(k,label,type='text',opt={})=>{
+  const o=Object.assign({k,label,type},opt);
+  if(o.gen===undefined && GEN_BY_KEY[k]!==undefined)o.gen=GEN_BY_KEY[k];
+  return o;
+};
+const BIG_DOMAINS=['www.microsoft.com','www.google.com','www.cloudflare.com','www.apple.com','www.github.com','www.amazon.com','www.bing.com','www.yahoo.com'];
+const randDomain=()=>BIG_DOMAINS[Math.floor(Math.random()*BIG_DOMAINS.length)];
+const TLS_LABEL={none:'不加密',selfsigned:'自签证书',cert:'外部证书',reality:'Reality'};
+const OUTBOUND=[F('outbound-bind-ipv4','出站绑定 IPv4'),F('outbound-bind-ipv6','出站绑定 IPv6'),F('outbound-socks5','出站 SOCKS5','text',{ph:'host:port'}),F('outbound-username','出站用户名'),F('outbound-password','出站密码')];
+// TLS 各互斥模式的字段：branch='tls:<mode>' 表示该字段只在选中该 TLS 模式时显示/提交。
+const TLS_FIELDS={
+  none:[],
+  selfsigned:[F('self-signed-domain','自签域名','text',{branch:'tls:selfsigned',ph:'留空则自动生成大厂域名'})],
+  cert:[F('cert-ref','面板证书（SSL 证书页申请）','certref'),F('cert','证书 cert','text',{branch:'tls:cert',ph:'/path/fullchain.pem'}),F('key','私钥 key','text',{branch:'tls:cert',ph:'/path/privkey.pem'}),F('cert-domain','证书域名（导出 SNI）','text',{branch:'tls:cert',ph:'证书绑定的域名，仅用于生成客户端链接的 SNI'})],
+  reality:[F('reality-private-key','Reality 私钥','text',{branch:'tls:reality',required:true}),F('reality-dest','Reality 目标','text',{branch:'tls:reality',required:true,ph:'www.microsoft.com:443'}),F('reality-server-name','Reality SNI','text',{branch:'tls:reality',required:true}),F('reality-short-ids','Short IDs','text',{branch:'tls:reality',required:true,ph:'多个用逗号分隔'})],
+};
+// 传输各互斥模式的字段：max-early-data/early-data-header 仅 ws 有效。
+const TRANS_FIELDS={
+  tcp:[],
+  ws:[F('path','路径','text',{branch:'trans:ws',def:'/'}),F('host','Host','text',{branch:'trans:ws'}),F('max-early-data','0-RTT 字节数','number',{branch:'trans:ws',def:'0',adv:true}),F('early-data-header','0-RTT Header','text',{branch:'trans:ws',adv:true,ph:'Sec-WebSocket-Protocol'})],
+  xhttp:[F('path','路径','text',{branch:'trans:xhttp',def:'/'}),F('host','Host','text',{branch:'trans:xhttp'}),F('h3','启用 H3 (QUIC) 传输','bool',{branch:'trans:xhttp',hint:'勾选后通过 HTTP/3 (QUIC/UDP) 提供 XHTTP，需同时启用 TLS；监听端口变为 UDP，客户端链接自动带 alpn=h3'})],
+};
+const TUIC_TIME=[F('max-idle-time','空闲超时','text',{def:'30s'}),F('auth-timeout','认证超时','text',{def:'3s'}),F('udp-timeout','UDP 超时','text',{def:'30s'}),F('heartbeat','心跳','text',{def:'10s'}),F('max-udp-packet-size','UDP 包大小','number',{def:'65535'})];
+const SQ_ADV=[F('jls-upstream','JLS 伪装上游','text',{ph:'www.microsoft.com:443',required:true}),F('server-name','SNI','text'),F('alpn','ALPN','text',{ph:'h3，多个用逗号分隔'}),F('zero-rtt','0-RTT','bool',{def:true}),F('congestion-control','拥塞控制','select',{opts:['bbr','cubic','new-reno','brutal'],def:'bbr'}),F('initial-mtu','初始 MTU','number',{def:'1300'}),F('min-mtu','最小 MTU','number',{def:'1290'}),F('gso','GSO','bool',{def:true}),F('mtu-discovery','MTU 发现','bool',{def:true}),F('blackhole-detection','黑洞检测','bool',{def:false}),F('udp-timeout','UDP 超时','text',{def:'30s'})];
+// tls: 该协议支持的 TLS 互斥模式；trans: 支持的传输互斥模式；两者缺省表示无。
+// 强制 TLS 协议（hy2/tuic/anytls/naiveproxy）不给"不加密"选项。
+const SCHEMA={
+  hysteria2:{tls:['selfsigned','cert'],fields:[F('password','密码','password',{required:true}),F('up','上行带宽','text',{adv:true,ph:'如 200 mbps'}),F('down','下行带宽','text',{adv:true,ph:'如 100 mbps'}),F('masquerade-url','伪装 URL','text',{adv:true}),F('masquerade-rewrite-host','伪装重写 Host','bool',{adv:true})]},
+  vless:{tls:['none','selfsigned','cert','reality'],trans:['tcp','ws','xhttp'],fields:[F('uuid','UUID','text',{required:true})]},
+  vmess:{tls:['none','selfsigned','cert'],trans:['tcp','ws','xhttp'],fields:[F('uuid','UUID','text',{required:true})]},
+  trojan:{tls:['none','selfsigned','cert'],trans:['tcp','ws','xhttp'],fields:[F('password','密码','password',{required:true})]},
+  shadowsocks:{tls:['none','selfsigned','cert'],trans:['tcp','ws','xhttp'],fields:[F('password','密码（base64）','text',{required:true,gen:'ss'}),F('method','加密方式','select',{opts:['2022-blake3-aes-256-gcm','2022-blake3-aes-128-gcm','2022-blake3-chacha20-poly1305'],def:'2022-blake3-aes-256-gcm'})]},
+  tuic:{tls:['selfsigned','cert'],fields:[{k:'users',label:'用户（UUID + 密码）',type:'list',item:[F('uuid','UUID'),F('password','密码','password')]},...TUIC_TIME.map(f=>({...f,adv:true})),F('udp-relay-ipv6','UDP6 中继','bool',{adv:true})]},
+  anytls:{tls:['selfsigned','cert'],fields:[F('password','密码','password',{required:true}),F('padding-scheme','Padding 方案','text',{adv:true})]},
+  socks:{fields:[{k:'users',label:'用户（用户名 + 密码，留空=无认证）',type:'list',item:[F('username','用户名'),F('password','密码','password')]}]},
+  http:{tls:['none','selfsigned','cert'],fields:[{k:'users',label:'用户（用户名 + 密码，留空=无认证）',type:'list',item:[F('username','用户名'),F('password','密码','password')]}]},
+  naiveproxy:{tls:['selfsigned','cert'],fields:[{k:'users',label:'用户（用户名 + 密码）',type:'list',item:[F('username','用户名'),F('password','密码','password')]},F('padding','Padding','bool',{adv:true}),F('masquerade-url','伪装 URL','text',{adv:true})]},
+  shadowquic:{fields:[{k:'users',label:'用户（用户名 + 密码）',type:'list',item:[F('username','用户名'),F('password','密码','password')]},...SQ_ADV.map((f,i)=>({...f,adv:i>=2}))]},
+  spectre:{fields:[F('password','JLS 密钥','password',{required:true}),F('username','用户名（iv）','text',{adv:true}),F('server-name','SNI','text',{def:'www.cloudflare.com'}),F('upstream','伪装上游','text',{def:'www.cloudflare.com:443'}),F('obfs-psk','混淆 PSK','text',{adv:true}),F('udp-timeout','UDP 超时','text',{def:'120s',adv:true})]},
+  wireguard:{fields:[F('private-key','服务端私钥','text',{required:true}),F('server-address','隧道地址','text',{ph:'10.0.0.1/24，多个用逗号分隔'}),F('mtu','MTU','number',{def:'1420',adv:true}),{k:'peers',label:'Peers（公钥 / 预共享密钥 / AllowedIPs）',type:'list',item:[F('public-key','公钥'),F('pre-shared-key','预共享密钥'),F('allowed-ips','AllowedIPs')]}]},
+};
+const PROTO_NAMES={hysteria2:'Hysteria2',vless:'VLESS',vmess:'VMess',trojan:'Trojan',shadowsocks:'Shadowsocks',tuic:'TUIC',anytls:'AnyTLS',socks:'SOCKS5',http:'HTTP',naiveproxy:'NaiveProxy',shadowquic:'ShadowQuic',spectre:'Spectre',wireguard:'WireGuard'};
+function genBtnHTML(f){
+  if(!f.gen)return '';
+  return '<button type="button" class="genbtn" data-gen="'+f.gen+'" data-gen-for="'+f.k+'"'+(f.genExtra?' data-gen-extra="'+f.genExtra+'"':'')+' title="随机生成">⚙ 生成</button>';
+}
+function inputHTML(f,val){
+  if(f.kind==='rlabel')return '<div class="sec-title" data-adv="1">'+esc(f.text)+'</div>';
+  const v=val==null?(f.def!=null?f.def:''):val;
+  if(f.type==='certref'){
+    // 面板证书下拉：'' = 手动填写路径；其余为 SSL 证书页申请的证书 id。
+    const opts=['<option value="">手动填写下方路径</option>'].concat(CERTS.map(c=>{
+      const st=c.status==='active'?'':'（'+(c.status==='pending'?'申请中':'失败')+'）';
+      const exp=c['expires-at-ms']?new Date(c['expires-at-ms']).toLocaleDateString('zh-CN',{hour12:false}):'';
+      return '<option value="'+esc(c.id)+'" '+(v===c.id?'selected':'')+'>'+esc((c.domains||[]).join(', '))+st+(exp?' · '+exp:'')+'</option>';
+    }));
+    return '<select data-k="cert-ref" id="certRefSelect">'+opts.join('')+'</select>';
+  }
+  if(f.type==='select')return '<select data-k="'+f.k+'">'+f.opts.map(o=>'<option '+(String(v)===o?'selected':'')+'>'+esc(o)+'</option>').join('')+'</select>';
+  if(f.type==='bool')return '<label class="chk"><input type="checkbox" data-k="'+f.k+'" '+(v===true||v==='true'?'checked':'')+'></label>';
+  if(f.type==='textarea')return '<textarea data-k="'+f.k+'" placeholder="'+esc(f.ph||'')+'">'+esc(v)+'</textarea>';
+  const mk=f.gen?' data-genbtn="1"':'';
+  return '<input type="'+(f.type==='password'?'password':f.type==='number'?'number':'text')+'" data-k="'+f.k+'" value="'+esc(v)+'" placeholder="'+esc(f.ph||'')+'"'+mk+'>'+genBtnHTML(f);
+}
+function listHTML(f,val){
+  const items=Array.isArray(val)&&val.length?val:[{}];
+  const rows=items.map(it=>'<div class="lrow">'+f.item.map(sf=>'<div class="fld"><label>'+esc(sf.label)+'</label>'+inputHTML(sf,it[sf.k])+'</div>').join('')+'<button type="button" class="btn danger mini rowrm">×</button></div>').join('');
+  return '<div class="list" data-list="'+f.k+'">'+rows+'</div><button type="button" class="btn mini rowadd" data-list="'+f.k+'">+ 添加一行</button>';
+}
+// 从已有节点配置反推互斥模式（编辑回填用）。
+function inferTlsMode(node,schema){
+  if(!schema.tls)return null;
+  if(node&&node['reality-private-key'])return 'reality';
+  if(node&&(node['cert-ref']||node.cert||node.key))return 'cert';
+  if(node&&node['self-signed-domain'])return 'selfsigned';
+  // 强制 TLS 协议无"不加密"选项，默认自签；可选协议默认不加密。
+  return schema.tls.includes('selfsigned')&&!schema.tls.includes('none')?'selfsigned':'none';
+}
+function inferTransMode(node,schema){
+  if(!schema.trans)return null;
+  const t=node&&node.transport;
+  return schema.trans.includes(t)?t:'tcp';
+}
+function branchFieldHTML(f,val,branch){
+  return '<div class="fld'+(f.adv?' adv':'')+'" data-branch="'+branch+'"><label>'+esc(f.label)+(f.required?' *':'')+'</label>'+(f.type==='list'?listHTML(f,val):inputHTML(f,val))+(f.hint?'<div class="hint2">'+esc(f.hint)+'</div>':'')+'</div>';
+}
+function buildForm(node){
+  const type=node?node.type:'hysteria2';
+  const schema=SCHEMA[type]||SCHEMA.hysteria2;
+  let html='<div class="fld"><label>节点名称 *</label><input type="text" data-k="name" value="'+esc(node?node.name:'')+'"></div>';
+  html+='<div class="fld"><label>协议类型</label><select id="editType" data-k="type">'+Object.keys(PROTO_NAMES).map(k=>'<option value="'+k+'" '+(k===type?'selected':'')+'>'+PROTO_NAMES[k]+'</option>').join('')+'</select><div class="hint2">切换协议将重置下方表单。</div></div>';
+  html+='<div class="fld"><label>端口 *</label><input type="number" data-k="port" value="'+esc(node?node.port:443)+'"></div>';
+  html+='<div class="fld"><label>监听地址</label><input type="text" data-k="listen" value="'+esc(node&&node.listen!=null?node.listen:'::')+'"></div>';
+
+  // 协议基础字段（凭据等，非互斥）
+  html+='<div class="sec-title">协议配置 · '+PROTO_NAMES[type]+'</div>';
+  for(const f of schema.fields){
+    html+='<div class="fld'+(f.adv?' adv':'')+'"><label>'+esc(f.label)+(f.required?' *':'')+'</label>'+(f.type==='list'?listHTML(f,node?node[f.k]:null):inputHTML(f,node?node[f.k]:null))+'</div>';
+  }
+
+  // TLS 互斥组：下拉 + 各模式字段（仅当前模式显示）
+  if(schema.tls){
+    const cur=inferTlsMode(node,schema);
+    html+='<div class="sec-title">TLS 加密（互斥）</div>';
+    html+='<div class="fld"><label>TLS 模式</label><select id="tlsMode">'+schema.tls.map(m=>'<option value="'+m+'" '+(m===cur?'selected':'')+'>'+TLS_LABEL[m]+'</option>').join('')+'</select></div>';
+    for(const m of schema.tls){
+      for(const f of (TLS_FIELDS[m]||[])){
+        let v=node?node[f.k]:null;
+        // 新节点自签域名预填随机大厂域名。
+        if(f.k==='self-signed-domain'&&(v==null||v===''))v=randDomain();
+        html+=branchFieldHTML(f,v,'tls:'+m);
+      }
+    }
+  }
+
+  // 传输互斥组
+  if(schema.trans){
+    const cur=inferTransMode(node,schema);
+    html+='<div class="sec-title">传输方式（互斥）</div>';
+    html+='<div class="fld"><label>传输方式</label><select id="transMode">'+schema.trans.map(m=>'<option value="'+m+'" '+(m===cur?'selected':'')+'>'+m.toUpperCase()+'</option>').join('')+'</select></div>';
+    for(const m of schema.trans){
+      for(const f of (TRANS_FIELDS[m]||[])){
+        const v=node&&node[f.k]!=null?node[f.k]:(f.def!=null?f.def:null);
+        html+=branchFieldHTML(f,v,'trans:'+m);
+      }
+    }
+  }
+
+  html+='<div class="sec-title adv">出站设置（高级）</div>';
+  for(const f of OUTBOUND)html+='<div class="fld adv"><label>'+esc(f.label)+'</label>'+inputHTML(f,node?node[f.k]:null)+'</div>';
+  return html;
+}
+// 只显示当前激活的互斥分支字段；隐藏其它分支（含其 list）。
+function applyBranches(){
+  const tlsEl=$('tlsMode'),transEl=$('transMode');
+  const tls=tlsEl?tlsEl.value:null,trans=transEl?transEl.value:null;
+  document.querySelectorAll('#editBody [data-branch]').forEach(f=>{
+    const [g,m]=f.dataset.branch.split(':');
+    const active=(g==='tls'?tls:trans)===m;
+    f.style.display=active?'':'none';
+  });
+}
+function collectForm(){
+  const obj={};
+  const tlsEl=$('tlsMode'),transEl=$('transMode');
+  const tls=tlsEl?tlsEl.value:null,trans=transEl?transEl.value:null;
+  // 顶层字段（name/type/port/listen + 协议基础字段），跳过互斥分支。
+  // 分支字段的 .fld 同样带 data-branch，必须用 :not([data-branch]) 排除，
+  // 否则隐藏分支里预填的字段（如 self-signed-domain）会被误收集，与 reality/cert 冲突。
+  document.querySelectorAll('#editBody > .fld:not([data-branch]) > [data-k], #editBody > .fld:not([data-branch]) > label.chk > [data-k]').forEach(el=>{
+    const k=el.dataset.k;let v;
+    if(el.tagName==='SELECT')v=el.value;
+    else if(el.type==='checkbox')v=el.checked;
+    else if(el.type==='number')v=el.value===''?0:Number(el.value);
+    else v=el.value;
+    if(v!=='' && v!=null)obj[k]=v;
+  });
+  // 写入传输方式（互斥选择）。
+  if(trans)obj.transport=trans;
+  // 互斥分支字段：只收集当前激活的分支（含分支内的 list）。
+  document.querySelectorAll('#editBody .fld[data-branch]').forEach(f=>{
+    const [g,m]=f.dataset.branch.split(':');
+    if((g==='tls'?tls:trans)!==m)return; // 非激活分支，跳过
+    const el=f.querySelector(':scope > [data-k], :scope > label.chk > [data-k]');
+    if(el){
+      let v;
+      if(el.tagName==='SELECT')v=el.value;
+      else if(el.type==='checkbox')v=el.checked;
+      else if(el.type==='number')v=el.value===''?0:Number(el.value);
+      else v=el.value;
+      if(v!==''&&v!=null)obj[el.dataset.k]=v;
+    }
+    const lst=f.querySelector(':scope > .list');
+    if(lst){
+      const arr=[];
+      lst.querySelectorAll('.lrow').forEach(row=>{
+        const it={};
+        row.querySelectorAll('[data-k]').forEach(e=>{const v=e.value;if(v!=='')it[e.dataset.k]=v});
+        if(Object.keys(it).length)arr.push(it);
+      });
+      obj[lst.dataset.list]=arr;
+    }
+  });
+  // 非分支 list 字段（users/peers 等），同样排除互斥分支内的 list。
+  document.querySelectorAll('#editBody > .fld:not([data-branch]) > .list').forEach(lst=>{
+    const key=lst.dataset.list;
+    const arr=[];
+    lst.querySelectorAll('.lrow').forEach(row=>{
+      const it={};
+      row.querySelectorAll('[data-k]').forEach(el=>{const v=el.value;if(v!=='')it[el.dataset.k]=v});
+      if(Object.keys(it).length)arr.push(it);
+    });
+    obj[key]=arr;
+  });
+  // Reality short-ids: 逗号分隔转数组。
+  if(obj['reality-short-ids']&&typeof obj['reality-short-ids']==='string'){
+    obj['reality-short-ids']=obj['reality-short-ids'].split(',').map(s=>s.trim()).filter(Boolean);
+  }
+  // 引用面板证书时，手动 cert/key/cert-domain 不参与提交。
+  if(obj['cert-ref']){
+    delete obj.cert;delete obj.key;delete obj['cert-domain'];
+  }else{
+    delete obj['cert-ref'];
+  }
+  return obj;
+}
+function bindListButtons(){
+  document.querySelectorAll('#editBody .rowadd').forEach(b=>b.onclick=()=>{
+    const lst=$('editBody').querySelector('.list[data-list="'+b.dataset.list+'"]');
+    const tmpl=lst.querySelector('.lrow');
+    const row=tmpl.cloneNode(true);row.querySelectorAll('input').forEach(i=>i.value='');
+    lst.appendChild(row);
+  });
+  document.querySelectorAll('#editBody .rowrm').forEach(b=>b.onclick=()=>{
+    const row=b.closest('.lrow');const lst=row.parentElement;
+    if(lst.querySelectorAll('.lrow').length>1)row.remove();else row.querySelectorAll('input').forEach(i=>i.value='');
+  });
+}
+// 统一刷新字段可见性：互斥分支激活 + 高级选项展开，两者都满足才显示。
+let advShown=false;
+function refreshFieldVisibility(){
+  const tlsEl=$('tlsMode'),transEl=$('transMode');
+  const tls=tlsEl?tlsEl.value:null,trans=transEl?transEl.value:null;
+  // 选了面板证书时隐藏手动 cert/key/cert-domain 输入。
+  const certRef=$('certRefSelect'), useCertRef=certRef&&certRef.value!=='';
+  document.querySelectorAll('#editBody .fld').forEach(f=>{
+    let show=true;
+    if(f.dataset.branch){
+      const [g,m]=f.dataset.branch.split(':');
+      show=(g==='tls'?tls:trans)===m;
+    }
+    if(useCertRef&&f.dataset.branch==='tls:cert'&&f.querySelector('[data-k="cert"],[data-k="key"],[data-k="cert-domain"]'))show=false;
+    if(f.classList.contains('adv')&&!advShown)show=false;
+    f.style.display=show?'':'none';
+  });
+  // 高级分组标题（如「出站设置（高级）」）跟随展开状态显隐。
+  document.querySelectorAll('#editBody .sec-title[data-adv]').forEach(t=>{
+    t.style.display=advShown?'':'none';
+  });
+}
+async function doGen(btn){
+  const kind=btn.dataset.gen, key=btn.dataset.genFor, extra=btn.dataset.genExtra||'';
+  const fld=btn.closest('.fld');
+  const input=fld?fld.querySelector('[data-k="'+key+'"]'):null;
+  if(!input)return;
+  const old=btn.textContent;btn.textContent='…';btn.disabled=true;
+  try{
+    const r=await api('/api/gen?kind='+encodeURIComponent(kind));
+    input.value=r.value||'';
+    // reality 私钥：同步填 short-id
+    if((extra||kind==='reality-key')){const ei=$('editBody').querySelector('[data-k="'+(extra||'reality-short-ids')+'"]');if(ei)ei.value=r.extra||''}
+    // wireguard 私钥：把派生公钥提示给用户（客户端对端需要它）
+    if(kind==='wg-key'&&r.extra)toast('私钥已生成，公钥：'+r.extra);
+    input.dispatchEvent(new Event('input',{bubbles:true}));
+  }catch(e){showErr(e)}finally{btn.textContent=old;btn.disabled=false}
+}
+function wireEditForm(){
+  bindListButtons();
+  // 生成按钮（事件委托，覆盖普通字段、互斥分支字段、list 行内字段）
+  $('editBody').onclick=function(e){
+    const btn=e.target.closest('.genbtn');if(btn){e.preventDefault();doGen(btn)}
+  };
+  const wireSelect=(id,fn)=>{const el=id?$(id):null;if(el)el.onchange=fn};
+  wireSelect('editType',function(){openEditForType(this.value)});
+  wireSelect('tlsMode',refreshFieldVisibility);
+  wireSelect('transMode',refreshFieldVisibility);
+  wireSelect('certRefSelect',refreshFieldVisibility);
+  advShown=false;
+  $('toggleAdv').textContent='显示高级选项 ▾';
+  refreshFieldVisibility();
+}
+async function openEdit(name,detailList){
+  const node=detailList?detailList.find(n=>n.name===name):null;
+  curEditName=name;
+  await loadCerts(); // 面板证书下拉数据
+  $('editTitle').textContent=node?'编辑节点 · '+name:'新增节点';
+  $('editBody').innerHTML=buildForm(node);
+  wireEditForm();
+  $('editMask').classList.add('show');
+}
+$('btnAdd').onclick=()=>openEdit(null,null);
+function openEditForType(type){curEditName=null;$('editTitle').textContent='新增节点 · '+PROTO_NAMES[type];$('editBody').innerHTML=buildForm({type,port:443});wireEditForm();$('editType').value=type}
+$('toggleAdv').onclick=function(){advShown=!advShown;refreshFieldVisibility();this.textContent=advShown?'隐藏高级选项 ▴':'显示高级选项 ▾'};
+$('saveNode').onclick=async()=>{
+  try{
+    const obj=collectForm();
+    if(!obj.name||!obj.port)throw new Error('请填写节点名称和端口');
+    // 保存前按协议传输层预检端口占用（TCP/UDP 分层，互不冲突）。
+    // 编辑时用 exclude 排除自身正在监听的端口，避免误判。
+    const q='/api/port-check?port='+encodeURIComponent(obj.port)+'&type='+encodeURIComponent(obj.type||'')
+      +(curEditName?'&exclude='+encodeURIComponent(curEditName):'');
+    const chk=await api(q);
+    if(!chk.ok)throw new Error(chk.error||'端口不可用，未保存');
+    let url,method,body;
+    if(curEditName){obj._old_name=curEditName;url='/api/nodes';method='PUT';body=obj}
+    else{url='/api/nodes';method='POST';body=obj}
+    const r=await api(url,{method,headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    $('editMask').classList.remove('show');toast('节点已保存并生效');await refreshAll();
+  }catch(e){showErr(e)}
+};
+async function delNode(name){if(!confirm('确定删除节点「'+name+'」？立即停止监听。'))return;try{await api('/api/nodes?name='+encodeURIComponent(name),{method:'DELETE'});toast('已删除');await refreshAll()}catch(e){showErr(e)}}
+
+/* ── 导出分享链接 ── */
+let curExportName=null;
+function guessHost(node){
+  // 从节点已有配置推断一个对外域名，作为预填值。
+  const cands=[node['self-signed-domain'],node['reality-server-name'],node['server-name'],
+    node['reality-dest'],node['upstream'],node['masquerade-url']];
+  for(const c of cands){if(!c)continue;let s=String(c);
+    try{s=new URL(s.includes('://')?s:'https://'+s).hostname}catch(e){s=s.split(':')[0].split('/')[0]}
+    if(s)return s;
+  }
+  return '';
+}
+async function openExport(name,detail){
+  const node=detail.find(n=>n.name===name)||{};
+  curExportName=name;
+  const prev=localStorage.getItem('flux_export_host');
+  // 先用节点配置/缓存即时占位，随后用服务端检测到的本机 IP 覆盖
+  $('exportHost').value=guessHost(node)||prev||'';
+  $('exportLink').value='';
+  $('exportNodeName').textContent='节点：'+name+'（'+(node.type||'')+' : '+(node.port||'')+'）';
+  $('exportMask').classList.add('show');
+  // 自动检测服务器对外 IP：公网 IPv4 → 公网 IPv6 → 内网地址
+  try{
+    const r=await api('/api/server-ip');
+    if(r&&r.ip)$('exportHost').value=r.ip;
+  }catch(e){/* 检测失败时保留占位值，仍可手动填写 */}
+}
+$('genExport').onclick=async()=>{
+  const host=$('exportHost').value.trim();
+  if(!host){toast('请填写对外地址');return}
+  try{
+    localStorage.setItem('flux_export_host',host);
+    const r=await api('/api/export',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:curExportName,host})});
+    $('exportLink').value=r.link||'';
+    toast('链接已生成');
+  }catch(e){$('exportLink').value='';showErr(e)}
+};
+$('copyExport').onclick=async()=>{
+  const link=$('exportLink').value;
+  if(!link){toast('请先生成链接');return}
+  try{await navigator.clipboard.writeText(link);toast('已复制到剪贴板')}
+  catch(e){$('exportLink').select();document.execCommand('copy');toast('已复制')}
+};
+
+/* ── 一键配置 ── */
+function buildQuick(){
+  $('protoGrid').innerHTML=Object.keys(PROTO_NAMES).map(k=>{
+    // 强制 TLS 的协议（hy2/tuic/anytls/naiveproxy/shadowquic/spectre）无需选项，
+    // 自动使用随机大厂域名自签证书；仅"可选 TLS"的协议给出下拉。
+    const opts=(k==='vless'||k==='vmess'||k==='trojan'||k==='shadowsocks')?
+      '<select data-qtls="'+k+'"><option value="selfsigned">自签证书</option><option value="none">不启用TLS</option>'+(k==='vless'?'<option value="reality">Reality</option>':'')+'</select><select data-qtrans="'+k+'"><option value="tcp">tcp</option><option value="ws">ws</option><option value="xhttp">xhttp</option></select>':
+      (k==='http'?'<select data-qtls="'+k+'"><option value="selfsigned">自签证书</option><option value="none">不启用</option></select>':'');
+    return '<div class="proto-opt"><input type="checkbox" data-q="'+k+'" id="q_'+k+'"><label for="q_'+k+'">'+PROTO_NAMES[k]+'</label><span class="mini-fields">'+opts+'</span></div>';
+  }).join('');
+}
+$('btnQuick').onclick=()=>{buildQuick();$('quickMask').classList.add('show')};
+$('doQuick').onclick=async()=>{
+  const protocols=[];
+  document.querySelectorAll('[data-q]:checked').forEach(cb=>{
+    const k=cb.dataset.q;
+    const qs=document.querySelector('[data-qtls="'+k+'"]');
+    const qt=document.querySelector('[data-qtrans="'+k+'"]');
+    protocols.push({type:k,tls:qs?qs.value:'selfsigned',transport:qt?qt.value:'tcp'});
+  });
+  if(!protocols.length){toast('请至少勾选一个协议');return}
+  try{
+    const r=await api('/api/nodes/quick',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({protocols,port:Number($('quickPort').value)||443})});
+    $('quickMask').classList.remove('show');
+    toast(r.ok?('已部署 '+r.created.length+' 个节点'):'部分部署失败');
+    if(r.errors&&r.errors.length)showErr(new Error(r.errors.join('; ')));
+    await refreshAll();
+  }catch(e){showErr(e)}
+};
+
+/* ── 设置 ── */
+$('saveSettings').onclick=async()=>{
+  try{
+    const u=$('setUser').value.trim(),p=$('setPass').value;
+    const portStr=$('setPort').value.trim();
+    const body={u,p};
+    if(portStr){const pt=parseInt(portStr,10);if(!pt||pt<1||pt>65535){showErr(new Error('端口必须是 1-65535'));return}body.port=pt}
+    const r=await api('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    $('setPass').value='';$('setPort').value='';
+    toast('设置已保存');
+    if(r.port_changed){setTimeout(()=>location.href='/login',1200)}
+    else if(r.relogin){setTimeout(()=>location.href='/login',800)}
+  }catch(e){showErr(e)}
+};
+
+/* ── 启动 ── */
+refreshAll();timer=setInterval(refreshAll,5000);
+api('/api/settings').then(s=>{$('setUser').value=s.user||'';$('setPort').placeholder=s.port||'9080'}).catch(()=>{});
+</script>
+</body>
+</html>
