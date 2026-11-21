@@ -16,6 +16,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::net::IpAddr;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, RwLock};
 use tokio::net::TcpListener;
@@ -30,13 +31,79 @@ const LOGIN_HTML: &str = include_str!("login.html");
 const INDEX_HTML: &str = include_str!("index.html");
 const SESSION_TTL_MS: u64 = 24 * 3600 * 1000;
 
+// ── 登录防爆破 ──────────────────────────────────────────────────────────────
+/// 15 分钟窗口内连续失败 MAX_FAILS 次后锁定 LOCKOUT_MS。
+const MAX_FAILS: u32 = 5;
+const LOCKOUT_MS: u64 = 15 * 60 * 1000;
+const FAIL_WINDOW_MS: u64 = 15 * 60 * 1000;
+
 type Resp = Response<Full<Bytes>>;
+
+/// Per-IP login failure tracking（内存态，重启即清零）。
+#[derive(Default)]
+struct LoginGuard {
+    /// ip → (失败次数, 窗口起点, 锁定截止)
+    failures: HashMap<String, (u32, u64, Option<u64>)>,
+}
+
+impl LoginGuard {
+    /// 返回 Ok(()) 或 Err(剩余锁定毫秒数)。
+    fn check_locked(&self, ip: &str) -> Result<(), u64> {
+        if let Some((_, _, Some(until))) = self.failures.get(ip) {
+            let now = stats::now_ms();
+            if now < *until {
+                return Err((*until).saturating_sub(now));
+            }
+        }
+        Ok(())
+    }
+
+    /// 记录一次失败。返回 Err(剩余锁定毫秒数) 表示本次已触发锁定。
+    fn record_failure(&mut self, ip: &str) -> Result<(), u64> {
+        let now = stats::now_ms();
+        // 顺带清理过期条目，防止表无限增长。
+        self.failures.retain(|_, (_, start, locked)| {
+            match locked {
+                Some(until) => now < *until,
+                None => now.saturating_sub(*start) <= FAIL_WINDOW_MS,
+            }
+        });
+        let e = self.failures.entry(ip.to_string()).or_insert((0, now, None));
+        let (count, start, locked) = e;
+        if now.saturating_sub(*start) > FAIL_WINDOW_MS {
+            *count = 0;
+            *start = now;
+            *locked = None;
+        }
+        if let Some(until) = locked {
+            if now < *until {
+                return Err((*until).saturating_sub(now));
+            }
+            // 锁定期满，重新计数
+            *count = 0;
+            *start = now;
+            *locked = None;
+        }
+        *count = count.saturating_add(1);
+        if *count >= MAX_FAILS {
+            *locked = Some(now + LOCKOUT_MS);
+            return Err(LOCKOUT_MS);
+        }
+        Ok(())
+    }
+
+    fn clear(&mut self, ip: &str) {
+        self.failures.remove(ip);
+    }
+}
 
 pub struct WebState {
     /// (用户名, PBKDF2 密码哈希)。可在设置页运行时修改。
     credentials: RwLock<(String, String)>,
     /// token → 过期时间（Unix ms）
     sessions: Mutex<HashMap<String, u64>>,
+    /// 登录防爆破状态（per-IP）
+    guard: Mutex<LoginGuard>,
     stats: Arc<Stats>,
     manager: Arc<NodeManager>,
     /// 面板端口更新通道：写入新端口后监听器自动重绑定。
@@ -54,6 +121,7 @@ impl WebState {
         Arc::new(Self {
             credentials: RwLock::new((user, pass_hash)),
             sessions: Mutex::new(HashMap::new()),
+            guard: Mutex::new(LoginGuard::default()),
             stats,
             manager,
             port_tx: Arc::new(port_tx),
@@ -76,14 +144,15 @@ pub async fn run(host: String, port_rx: Receiver<u16>, state: Arc<WebState>) -> 
         loop {
             tokio::select! {
                 accepted = listener.accept() => {
-                    let (stream, _peer) = accepted?;
+                    let (stream, peer) = accepted?;
                     let state = Arc::clone(&state);
                     tokio::spawn(async move {
                         let io = TokioIo::new(stream);
                         let svc = service_fn(move |req: Request<Incoming>| {
                             let state = Arc::clone(&state);
+                            let peer_ip = peer.ip();
                             async move {
-                                let resp = match handle(req, state).await {
+                                let resp = match handle(req, state, peer_ip).await {
                                     Ok(r) => r,
                                     Err(e) => {
                                         tracing::warn!("[web] request error: {e:#}");
@@ -108,7 +177,25 @@ pub async fn run(host: String, port_rx: Receiver<u16>, state: Arc<WebState>) -> 
     }
 }
 
-async fn handle(req: Request<Incoming>, state: Arc<WebState>) -> Result<Resp> {
+/// 解析限流/审计用的客户端 IP。
+/// 默认使用 TCP 直连地址；仅当设置环境变量 `FLUX_TRUST_PROXY=1`（面板位于
+/// 始终覆盖 X-Forwarded-For 的可信反代之后）时才信任该请求头，否则攻击者
+/// 可伪造 XFF 绕过登录锁定。
+fn client_ip(req: &Request<Incoming>, peer: IpAddr) -> String {
+    if std::env::var("FLUX_TRUST_PROXY").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false) {
+        if let Some(xff) = req.headers().get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+            if let Some(first) = xff.split(',').next() {
+                let t = first.trim();
+                if !t.is_empty() {
+                    return t.to_string();
+                }
+            }
+        }
+    }
+    peer.to_string()
+}
+
+async fn handle(req: Request<Incoming>, state: Arc<WebState>, peer_ip: IpAddr) -> Result<Resp> {
     let method = req.method().clone();
     let path = req.uri().path().to_string();
     let query = req.uri().query().unwrap_or("").to_string();
@@ -118,6 +205,8 @@ async fn handle(req: Request<Incoming>, state: Arc<WebState>) -> Result<Resp> {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
+    // 限流键必须在 collect（消耗 req）之前解析。
+    let client_ip = client_ip(&req, peer_ip);
     let body = req.collect().await?.to_bytes();
 
     // ── 无需鉴权的路由 ──────────────────────────────────────────────────────
@@ -125,7 +214,7 @@ async fn handle(req: Request<Incoming>, state: Arc<WebState>) -> Result<Resp> {
         return Ok(html(StatusCode::OK, LOGIN_HTML, None));
     }
     if path == "/api/login" && method == hyper::Method::POST {
-        return handle_login(&state, &body);
+        return handle_login(&state, &body, &client_ip);
     }
 
     if !is_authed(&state, &cookie) {
@@ -194,7 +283,20 @@ fn is_authed(state: &WebState, cookie: &str) -> bool {
     sessions.contains_key(token)
 }
 
-fn handle_login(state: &WebState, body: &[u8]) -> Result<Resp> {
+fn handle_login(state: &WebState, body: &[u8], ip: &str) -> Result<Resp> {
+    // 防爆破：锁定期间直接拒绝，不进入密码校验（也不泄漏锁定原因以外信息）。
+    {
+        let guard = state.guard.lock().unwrap();
+        if let Err(remain_ms) = guard.check_locked(ip) {
+            let mins = remain_ms.div_ceil(60_000).max(1);
+            tracing::warn!("[web] login blocked (lockout) from {ip}");
+            return Ok(json_resp(
+                StatusCode::TOO_MANY_REQUESTS,
+                json!({"ok": false, "error": format!("失败次数过多，账户已锁定，请约 {mins} 分钟后再试")}),
+            ));
+        }
+    }
+
     let v: Value = serde_json::from_slice(body).unwrap_or_default();
     let u = v.get("u").and_then(|x| x.as_str()).unwrap_or("");
     let p = v.get("p").and_then(|x| x.as_str()).unwrap_or("");
@@ -202,9 +304,29 @@ fn handle_login(state: &WebState, body: &[u8]) -> Result<Resp> {
         let c = state.credentials.read().unwrap();
         (c.0.clone(), c.1.clone())
     };
-    if !ct_eq(u.as_bytes(), user.as_bytes()) || !crypto::verify_password(p, &pass_hash) {
-        return Ok(json_resp(StatusCode::UNAUTHORIZED, json!({"ok": false, "error": "用户名或密码错误"})));
+    let ok = ct_eq(u.as_bytes(), user.as_bytes()) && crypto::verify_password(p, &pass_hash);
+    if !ok {
+        // 记录失败并可能触发锁定。
+        let verdict = {
+            let mut guard = state.guard.lock().unwrap();
+            guard.record_failure(ip)
+        };
+        tracing::warn!("[web] login failed from {ip}");
+        return match verdict {
+            Err(remain_ms) => {
+                let mins = remain_ms.div_ceil(60_000).max(1);
+                Ok(json_resp(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    json!({"ok": false, "error": format!("用户名或密码错误。连续失败 {MAX_FAILS} 次，账户已锁定，请约 {mins} 分钟后再试")}),
+                ))
+            }
+            Ok(()) => Ok(json_resp(
+                StatusCode::UNAUTHORIZED,
+                json!({"ok": false, "error": "用户名或密码错误"}),
+            )),
+        };
     }
+    state.guard.lock().unwrap().clear(ip);
 
     let mut raw = [0u8; 32];
     rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut raw);
@@ -216,15 +338,25 @@ fn handle_login(state: &WebState, body: &[u8]) -> Result<Resp> {
         .insert(token.clone(), stats::now_ms() + SESSION_TTL_MS);
 
     let cookie = format!(
-        "flux_session={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}",
-        SESSION_TTL_MS / 1000
+        "flux_session={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}{}",
+        SESSION_TTL_MS / 1000,
+        // HTTPS 部署（如反代终结 TLS）时可设 FLUX_SECURE_COOKIE=1 启用 Secure。
+        if secure_cookie() { "; Secure" } else { "" },
     );
+    tracing::info!("[web] login ok from {ip}");
     Ok(html(
         StatusCode::OK,
         "{\"ok\":true}",
         Some((CONTENT_TYPE, "application/json; charset=utf-8")),
     )
     .with_cookie(&cookie))
+}
+
+/// HTTPS 部署时给会话 cookie 加 `Secure` 属性（默认关闭，兼容纯 HTTP 面板）。
+fn secure_cookie() -> bool {
+    std::env::var("FLUX_SECURE_COOKIE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
 }
 
 fn handle_logout(state: &WebState, cookie: &str) -> Result<Resp> {
@@ -236,12 +368,14 @@ fn handle_logout(state: &WebState, cookie: &str) -> Result<Resp> {
     ))
 }
 
+/// 常数时间字节串比较：长度不等也走完全部循环，不提前返回，
+/// 避免通过响应时间差异推断用户名/Token 长度。
 fn ct_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
+    let mut diff = (a.len() ^ b.len()) as u64;
+    let n = a.len().max(b.len());
+    for i in 0..n {
+        let x = a.get(i).copied().unwrap_or(0u8) as u64;
+        let y = b.get(i).copied().unwrap_or(0u8) as u64;
         diff |= x ^ y;
     }
     diff == 0
