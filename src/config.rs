@@ -464,6 +464,15 @@ pub struct TransportConfig {
     /// （cert/key 或 self-signed-domain），Reality 不支持 H3。
     #[serde(default)]
     pub h3: bool,
+    /// 仅 `transport: xhttp`：XHTTP 模式（Xray `mode` 字段）。
+    /// `auto`（默认，接受所有形态）| `packet-up` | `stream-up` | `stream-one`。
+    /// 非 auto 时收到不匹配的请求形态直接 400（对齐 Xray hub.go / shoes）。
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// 仅 `transport: xhttp`：true = 下行响应不设置
+    /// `Content-Type: text/event-stream`（Xray `NoSSEHeader`，默认 false）。
+    #[serde(default)]
+    pub no_sse_header: bool,
 }
 
 // ── SOCKS5 ────────────────────────────────────────────────────────────────────
@@ -1299,6 +1308,14 @@ fn check_outbound(o: &OutboundConfig) -> Result<()> {
 }
 
 fn check_transport(t: &TransportConfig) -> Result<()> {
+    const XHTTP_MODES: [&str; 4] = ["auto", "packet-up", "stream-up", "stream-one"];
+    if let Some(m) = &t.mode {
+        if !XHTTP_MODES.contains(&m.trim().to_ascii_lowercase().as_str()) {
+            bail!(
+                "unknown xhttp mode `{m}` (expected auto | packet-up | stream-up | stream-one)"
+            );
+        }
+    }
     match t.kind.as_str() {
         "tcp" => {
             if t.path != "/"
@@ -1307,16 +1324,19 @@ fn check_transport(t: &TransportConfig) -> Result<()> {
                 || t.early_data_header.is_some()
                 || t.headers.is_some()
                 || t.h3
+                || t.mode.is_some()
+                || t.no_sse_header
             {
                 bail!(
-                    "path / host / max-early-data / early-data-header / headers / h3 only apply \
-                     to `transport: ws` or `xhttp`, but transport is `tcp` (forgot `transport: ws`?)"
+                    "path / host / max-early-data / early-data-header / headers / h3 / mode / \
+                     no-sse-header only apply to `transport: ws` or `xhttp`, but transport is \
+                     `tcp` (forgot `transport: ws`?)"
                 );
             }
         }
         "ws" => {
-            if t.h3 {
-                bail!("`h3: true` only applies to `transport: xhttp` (HTTP/3 over QUIC)");
+            if t.h3 || t.mode.is_some() || t.no_sse_header {
+                bail!("`h3` / `mode` / `no-sse-header` only apply to `transport: xhttp`");
             }
         }
         "xhttp" => {

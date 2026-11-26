@@ -70,10 +70,7 @@ pub async fn run(cfg: Arc<TrojanConfig>) -> Result<()> {
 
     // ── xhttp：server 级别 session 表（TCP h1/h2 与 UDP h3 通用）──────────────
     if cfg.transport.kind == "xhttp" {
-        let xh_cfg = XhttpConfig {
-            path: cfg.transport.path.clone(),
-            host: cfg.transport.host.clone(),
-        };
+        let xh_cfg = XhttpConfig::from_transport(&cfg.transport);
         let xhttp_server = XhttpServer::new(xh_cfg);
         let password = cfg.password.clone();
         let bind_ip = Outbound::new(&cfg.outbound);

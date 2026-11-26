@@ -85,10 +85,7 @@ pub async fn run(cfg: Arc<VmessConfig>) -> Result<()> {
     info!("[vmess] Listening on {addr}");
 
     if cfg.transport.kind == "xhttp" {
-        let xh_cfg = XhttpConfig {
-            path: cfg.transport.path.clone(),
-            host: cfg.transport.host.clone(),
-        };
+        let xh_cfg = XhttpConfig::from_transport(&cfg.transport);
         let srv = XhttpServer::new(xh_cfg);
         let outbound = Outbound::new(&cfg.outbound);
 

@@ -49,6 +49,11 @@ log-level: info
 #   host: your.domain.com   # 可选，严格校验 Host
 #   h3: false               # 仅 xhttp：true = 走 HTTP/3（QUIC/UDP 监听，alpn=h3），
 #                           #   对齐 Xray xhttp + alpn=h3；必须配置 TLS，Reality 不支持
+#   mode: auto              # 仅 xhttp：auto（默认，接受所有形态）| packet-up |
+#                           #   stream-up | stream-one；非 auto 时收到不匹配的
+#                           #   请求形态直接 400（对齐 Xray `mode`）
+#   no-sse-header: false    # 仅 xhttp：true = 下行响应不带
+#                           #   Content-Type: text/event-stream（Xray NoSSEHeader）
 #   max-early-data: 0       # 仅 ws：>0 启用 0-RTT 早期数据
 #   early-data-header: Sec-WebSocket-Protocol   # 仅 ws：不填则放在 URL 路径里
 #   headers:                # 仅 ws：自定义请求头
