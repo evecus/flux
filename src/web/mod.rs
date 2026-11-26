@@ -370,6 +370,7 @@ async fn handle(req: Request<Incoming>, state: Arc<WebState>, peer_ip: IpAddr) -
         ("GET", "/api/certs") => api_certs(&state),
         ("POST", "/api/certs") => api_cert_create(&state, &body).await,
         ("POST", "/api/certs/issue") => api_cert_issue(&state, &body).await,
+        ("POST", "/api/certs/upload") => api_cert_upload(&state, &query, &body).await,
         ("DELETE", "/api/certs") => api_cert_delete(&state, &query).await,
 
         // ── 随机凭据生成 & 分享链接导出 ────────────────────────────────
@@ -720,6 +721,19 @@ async fn api_cert_create(state: &Arc<WebState>, body: &[u8]) -> Result<Resp> {
     let zone = v.get("zone-id").and_then(|x| x.as_str()).unwrap_or("");
     let auto_renew = v.get("auto-renew").and_then(|x| x.as_bool()).unwrap_or(true);
     match state.manager.create_cert(domains, email, token, zone, auto_renew) {
+        Ok(id) => Ok(json_resp(StatusCode::OK, json!({"ok": true, "id": id}))),
+        Err(e) => Ok(json_resp(StatusCode::BAD_REQUEST, json!({"error": format!("{e:#}")}))),
+    }
+}
+
+/// 上传证书压缩包：body = zip 原始字节（Content-Type: application/octet-stream）。
+/// 可选 `?id=<已上传证书 id>` 表示替换更新（节点引用保持不变并热重载）。
+async fn api_cert_upload(state: &Arc<WebState>, query: &str, body: &[u8]) -> Result<Resp> {
+    if body.is_empty() {
+        return Ok(json_resp(StatusCode::BAD_REQUEST, json!({"error": "未收到文件"})));
+    }
+    let replace = query_param(query, "id");
+    match state.manager.import_cert(body, replace.as_deref()) {
         Ok(id) => Ok(json_resp(StatusCode::OK, json!({"ok": true, "id": id}))),
         Err(e) => Ok(json_resp(StatusCode::BAD_REQUEST, json!({"error": format!("{e:#}")}))),
     }

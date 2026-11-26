@@ -53,6 +53,9 @@ rustls = { version = "0.23", features = ["ring"] }
 rustls-pemfile = "2"
 tokio-rustls = "0.26"
 
+# 面板「上传证书压缩包」：只读 zip，在内存中解析（不落盘解压）
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
 # Self-signed certificate generation
 rcgen = "0.13"
 

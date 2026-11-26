@@ -204,7 +204,7 @@ td .ops{display:flex;gap:5px;justify-content:flex-end}
 
       <!-- SSL 证书 -->
       <section class="page" id="page-ssl">
-        <div class="ph-page"><h1>SSL 证书</h1><span class="sub">Let's Encrypt DNS-01（Cloudflare）自动申请与续签</span><span class="spacer"></span><button class="btn primary" id="btnAddCert">+ 申请证书</button></div>
+        <div class="ph-page"><h1>SSL 证书</h1><span class="sub">Let's Encrypt DNS-01（Cloudflare）自动申请与续签，或上传已有证书</span><span class="spacer"></span><button class="btn" id="btnUploadCert">上传证书</button><input type="file" id="certFile" accept=".zip,application/zip" style="display:none"><button class="btn primary" id="btnAddCert" style="margin-left:8px">+ 申请证书</button></div>
         <div class="panel"><table><thead><tr><th>域名</th><th>状态</th><th>到期时间</th><th>自动续签</th><th>引用节点</th><th style="text-align:right">操作</th></tr></thead><tbody id="certTable"><tr><td colspan="6" class="empty">加载中…</td></tr></tbody></table></div>
         <div class="panel">
           <div class="ph"><h3>说明</h3></div>
@@ -436,23 +436,38 @@ async function renderCertTable(){
   await loadCerts();
   // 同步节点列表以显示引用关系。
   let detail=[];try{detail=await api('/api/nodes/detail')||[]}catch(e){}
-  if(!CERTS.length){$('certTable').innerHTML='<tr><td colspan="6" class="empty">还没有证书，点击「申请证书」</td></tr>';return}
+  if(!CERTS.length){$('certTable').innerHTML='<tr><td colspan="6" class="empty">还没有证书，点击「申请证书」或「上传证书」</td></tr>';return}
   $('certTable').innerHTML=CERTS.map(c=>{
     const st=c.status||'error';
     const exp=c['expires-at-ms']?fmtTime(c['expires-at-ms']):'—';
     const days=c['expires-at-ms']?Math.max(0,Math.floor((c['expires-at-ms']-Date.now())/86400000)):null;
     const refs=detail.filter(n=>n['cert-ref']===c.id).map(n=>esc(n.name)).join(', ')||'—';
     const errMsg=(c.error&&c.status==='error')?'<div class="hint2" style="color:#b91c1c;margin-top:3px;word-break:break-all">'+esc(c.error)+'</div>':'';
-    return '<tr><td class="ip">'+esc((c.domains||[]).join(', '))+errMsg+'</td><td>'+certStatusBadge(st)+'</td><td class="mono">'+exp+(days!=null&&st==='active'?'（剩 '+days+' 天）':'')+'</td><td>'+(c['auto-renew']?'是':'否')+'</td><td>'+refs+'</td><td><div class="ops"><button class="btn mini" data-ssl-reissue="'+esc(c.id)+'">'+(st==='active'?'续签':'重试')+'</button><button class="btn danger mini" data-ssl-del="'+esc(c.id)+'">删除</button></div></td></tr>';
+    return '<tr><td class="ip">'+(c.source==='upload'?'<span class="badge" style="margin-right:6px">上传</span>':'')+esc((c.domains||[]).join(', '))+errMsg+'</td><td>'+certStatusBadge(st)+'</td><td class="mono">'+exp+(days!=null&&st==='active'?'（剩 '+days+' 天）':'')+'</td><td>'+(c.source==='upload'?'—':c['auto-renew']?'是':'否')+'</td><td>'+refs+'</td><td><div class="ops"><button class="btn mini" '+(c.source==='upload'?'data-ssl-replace="':'data-ssl-reissue="')+esc(c.id)+'">'+(c.source==='upload'?'更新':st==='active'?'续签':'重试')+'</button><button class="btn danger mini" data-ssl-del="'+esc(c.id)+'">删除</button></div></td></tr>';
   }).join('');
   document.querySelectorAll('[data-ssl-reissue]').forEach(b=>b.onclick=async()=>{
     try{await api('/api/certs/issue',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:b.dataset.sslReissue})});toast('已提交，申请约需 1~2 分钟');await renderCertTable()}catch(e){showErr(e)}
   });
+  document.querySelectorAll('[data-ssl-replace]').forEach(b=>b.onclick=()=>{certUploadTarget=b.dataset.sslReplace;$('certFile').click()});
   document.querySelectorAll('[data-ssl-del]').forEach(b=>b.onclick=async()=>{
     if(!confirm('确定删除该证书？引用它的节点将无法再使用。'))return;
     try{await api('/api/certs?id='+encodeURIComponent(b.dataset.sslDel),{method:'DELETE'});toast('已删除');await renderCertTable()}catch(e){showErr(e)}
   });
 }
+/* 上传证书压缩包（zip：crt/pem + key）；certUploadTarget 非空 = 更新已上传的那张 */
+let certUploadTarget='';
+$('btnUploadCert').onclick=()=>{certUploadTarget='';$('certFile').click()};
+$('certFile').onchange=async()=>{
+  const f=$('certFile').files[0];$('certFile').value='';
+  if(!f)return;
+  if(f.size>1.5*1024*1024){showErr(new Error('文件过大（上限约 1.5 MB）'));return}
+  try{
+    const r=await api('/api/certs/upload'+(certUploadTarget?'?id='+encodeURIComponent(certUploadTarget):''),{method:'POST',headers:{'Content-Type':'application/octet-stream'},body:f});
+    toast(certUploadTarget?'证书已更新，引用节点已重载':'证书已导入，可在节点编辑中选择引用');
+    await renderCertTable();
+  }catch(e){showErr(e)}
+  certUploadTarget='';
+};
 $('btnAddCert').onclick=()=>{$('sslMask').classList.add('show')};
 $('doSslCreate').onclick=async()=>{
   try{

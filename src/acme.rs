@@ -410,7 +410,10 @@ pub async fn run_renew_task(
 async fn renew_all(db: &Arc<Db>, dir: &Path, manager: &Arc<crate::node_manager::NodeManager>) -> Result<()> {
     let certs = db.list_certs()?;
     for (id, rec) in certs {
-        if rec["status"].as_str() != Some("active") || rec["auto-renew"].as_bool() != Some(true) {
+        if rec["source"].as_str() == Some("upload")
+            || rec["status"].as_str() != Some("active")
+            || rec["auto-renew"].as_bool() != Some(true)
+        {
             continue;
         }
         let expires = rec["expires-at-ms"].as_u64().unwrap_or(0);

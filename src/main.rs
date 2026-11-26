@@ -13,6 +13,7 @@
 //!   flux set-port <port> -d /path
 
 mod acme;
+mod certimport;
 mod anytls;
 mod common;
 mod config;

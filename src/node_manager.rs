@@ -108,6 +108,9 @@ impl NodeManager {
     pub async fn add_node(&self, value: Value) -> Result<Value> {
         let mut decl_node = value;
         strip_nulls(&mut decl_node);
+        // 入库保留原始声明（含 cert-ref），运行用的是解析出文件路径后的副本：
+        // 这样证书续签/更新时才能找到引用它的节点并热重载，删除证书时也能拦截被引用的情况。
+        let stored = decl_node.clone();
         self.resolve_cert_ref(&mut decl_node)?;
 
         let raw: NodeConfig =
@@ -128,7 +131,7 @@ impl NodeManager {
             if self.db().get_node(&name)?.is_some() {
                 bail!("duplicate node name `{name}`");
             }
-            self.db().put_node(&name, &decl_node)?;
+            self.db().put_node(&name, &stored)?;
         }
         self.launch_with_info(runnable, info.clone());
         Ok(serde_json::json!({ "ok": true, "name": name }))
@@ -138,6 +141,9 @@ impl NodeManager {
     pub async fn update_node(&self, old_name: &str, value: Value) -> Result<Value> {
         let mut decl_node = value;
         strip_nulls(&mut decl_node);
+        // 入库保留原始声明（含 cert-ref），运行用的是解析出文件路径后的副本：
+        // 这样证书续签/更新时才能找到引用它的节点并热重载，删除证书时也能拦截被引用的情况。
+        let stored = decl_node.clone();
         self.resolve_cert_ref(&mut decl_node)?;
 
         let raw: NodeConfig =
@@ -162,7 +168,7 @@ impl NodeManager {
             if new_name != old_name {
                 self.db().delete_node(old_name)?;
             }
-            self.db().put_node(&new_name, &decl_node)?;
+            self.db().put_node(&new_name, &stored)?;
         }
 
         // 停旧启新。
@@ -276,10 +282,47 @@ impl NodeManager {
         Ok(id)
     }
 
+    /// 导入证书压缩包（zip，内含 PEM 证书 + 私钥）。
+    /// `replace_id = Some(id)` 时替换已上传的同一条记录（节点引用保持不变，并热重载引用它的节点）。
+    pub fn import_cert(self: &Arc<Self>, zip_bytes: &[u8], replace_id: Option<&str>) -> Result<String> {
+        let imp = crate::certimport::import_zip(zip_bytes)?;
+        let (id, replacing) = match replace_id.filter(|s| !s.is_empty()) {
+            Some(id) => {
+                let old = self.db().get_cert(id)?.ok_or_else(|| anyhow::anyhow!("证书 `{id}` 不存在"))?;
+                if old["source"].as_str() != Some("upload") {
+                    bail!("只能用上传方式更新「上传」来源的证书；ACME 证书请使用「续签」");
+                }
+                (id.to_string(), true)
+            }
+            None => (crate::config::gen_uuid(), false),
+        };
+        let rec = serde_json::json!({
+            "id": id,
+            "source": "upload",
+            "domains": imp.domains,
+            "status": "active",
+            "error": "",
+            "auto-renew": false,
+            "cert-pem": imp.cert_pem,
+            "key-pem": imp.key_pem,
+            "issued-at-ms": crate::stats::now_ms(),
+            "expires-at-ms": imp.expires_ms,
+        });
+        self.db().put_cert(&id, &rec)?;
+        crate::acme::write_pem_files(&self.base_dir, &id, &rec)?;
+        if replacing {
+            self.reload_nodes_using_cert(&id);
+        }
+        Ok(id)
+    }
+
     /// 触发重新申请/续签（后台执行）。
     pub fn reissue_cert(self: &Arc<Self>, id: &str) -> Result<()> {
-        if self.db().get_cert(id)?.is_none() {
+        let Some(rec) = self.db().get_cert(id)? else {
             bail!("证书 `{id}` 不存在");
+        };
+        if rec["source"].as_str() == Some("upload") {
+            bail!("上传的证书不支持自动续签，请重新上传新的证书压缩包进行更新");
         }
         self.spawn_issue(id);
         Ok(())
