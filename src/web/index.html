@@ -522,7 +522,7 @@ const SCHEMA={
   http:{tls:['none','selfsigned','cert'],fields:[{k:'users',label:'用户（用户名 + 密码，留空=无认证）',type:'list',item:[F('username','用户名'),F('password','密码','password')]}]},
   naiveproxy:{tls:['selfsigned','cert'],fields:[{k:'users',label:'用户（用户名 + 密码）',type:'list',item:[F('username','用户名'),F('password','密码','password')]},F('padding','Padding','bool',{adv:true}),F('masquerade-url','伪装 URL','text',{adv:true})]},
   shadowquic:{fields:[{k:'users',label:'用户（用户名 + 密码）',type:'list',item:[F('username','用户名'),F('password','密码','password')]},...SQ_ADV.map((f,i)=>({...f,adv:i>=2}))]},
-  spectre:{fields:[F('password','JLS 密钥','password',{required:true}),F('username','用户名（iv）','text',{adv:true}),F('server-name','SNI','text',{def:'www.cloudflare.com'}),F('upstream','伪装上游','text',{def:'www.cloudflare.com:443'}),F('obfs-psk','混淆 PSK','text',{adv:true}),F('udp-timeout','UDP 超时','text',{def:'120s',adv:true})]},
+  spectre:{fields:[F('username','用户名（iv）','text',{def:'spectre',hint:'必须与客户端一致，默认 spectre'}),F('password','JLS 密钥','password',{required:true}),F('server-name','SNI','text',{def:'www.cloudflare.com'}),F('upstream','伪装上游','text',{def:'www.cloudflare.com:443'}),F('obfs-psk','混淆 PSK','text',{adv:true}),F('udp-timeout','UDP 超时','text',{def:'120s',adv:true})]},
   wireguard:{fields:[F('private-key','服务端私钥','text',{required:true}),F('server-address','隧道地址','text',{ph:'10.0.0.1/24，多个用逗号分隔'}),F('mtu','MTU','number',{def:'1420',adv:true}),{k:'peers',label:'Peers（公钥 / 预共享密钥 / AllowedIPs）',type:'list',item:[F('public-key','公钥'),F('pre-shared-key','预共享密钥'),F('allowed-ips','AllowedIPs')]}]},
 };
 const PROTO_NAMES={hysteria2:'Hysteria2',vless:'VLESS',vmess:'VMess',trojan:'Trojan',shadowsocks:'Shadowsocks',tuic:'TUIC',anytls:'AnyTLS',socks:'SOCKS5',http:'HTTP',naiveproxy:'NaiveProxy',shadowquic:'ShadowQuic',spectre:'Spectre',wireguard:'WireGuard'};
@@ -612,7 +612,7 @@ function buildForm(node){
     }
   }
 
-  html+='<div class="sec-title adv">出站设置（高级）</div>';
+  html+='<div class="sec-title" data-adv="1">出站设置（高级）</div>';
   for(const f of OUTBOUND)html+='<div class="fld adv"><label>'+esc(f.label)+'</label>'+inputHTML(f,node?node[f.k]:null)+'</div>';
   return html;
 }
@@ -717,7 +717,8 @@ function refreshFieldVisibility(){
     }
     if(useCertRef&&f.dataset.branch==='tls:cert'&&f.querySelector('[data-k="cert"],[data-k="key"],[data-k="cert-domain"]'))show=false;
     if(f.classList.contains('adv')&&!advShown)show=false;
-    f.style.display=show?'':'none';
+    // 必须显式设为 block：高级字段自带 CSS `display:none`，设成 '' 会回落到该样式导致永远展不开。
+    f.style.display=show?'block':'none';
   });
   // 高级分组标题（如「出站设置（高级）」）跟随展开状态显隐。
   document.querySelectorAll('#editBody .sec-title[data-adv]').forEach(t=>{
